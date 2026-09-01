@@ -2,7 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class ApiService {
-  static const String _baseUrl = 'http://localhost:5000/api';
+  static const String _baseUrl = 'https://zapchat-backend.vercel.app/api';
   // Note: For Chrome/Web use localhost:5000
   // For Android Emulator use: http://10.0.2.2:5000/api
   // For real device on same WiFi: http://192.168.1.X:5000/api

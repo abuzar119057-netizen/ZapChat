@@ -1,15 +1,11 @@
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 class SocketService {
-  static const String _serverUrl = 'http://localhost:5000';
-  // For Chrome/Web use: localhost:5000
-  // For Android Emulator use: http://10.0.2.2:5000
-  // For real device on same WiFi: http://192.168.1.X:5000
-
   static final SocketService _instance = SocketService._internal();
   factory SocketService() => _instance;
 
   IO.Socket? _socket;
+  final String _serverUrl = 'https://zapchat-backend.vercel.app';
   bool _isConnected = false;
   String? _userId;
 
