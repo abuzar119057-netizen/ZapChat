@@ -16,7 +16,7 @@ export const AuthProvider = ({ children }) => {
       // Remove trailing slash if present
       return `${backendUrl.replace(/\/$/, '')}/api`;
     }
-    return 'http://localhost:5000/api'; // fallback for local dev
+    return 'https://zapchat-backend.vercel.app/api'; // Live Vercel backend
   };
 
   const api = axios.create({
