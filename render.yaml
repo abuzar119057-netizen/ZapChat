@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: zapchat-backend
+    env: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: MONGODB_URI
+        value: mongodb+srv://abuzar01043:G05xQ9S2WvoDTp9p@cluster0.1knivxo.mongodb.net/zapchat?retryWrites=true&w=majority
+      - key: JWT_SECRET
+        value: your_secret_key
+      - key: PORT
+        value: 5000
