@@ -14,23 +14,27 @@ jobs:
       - name: Set up Java JDK
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.22.2'
           channel: 'stable'
 
-      - name: Install dependencies
-        run: cd zapchat_flutter && flutter pub get
+      - name: Get Dependencies
+        run: |
+          cd zapchat_flutter
+          flutter pub get
 
-      - name: Build APK
-        run: cd zapchat_flutter && flutter build apk --release
+      - name: Build Release APK
+        run: |
+          cd zapchat_flutter
+          flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ZapChat-Release-APK
+          name: ZapChat-APK
           path: zapchat_flutter/build/app/outputs/flutter-apk/app-release.apk
