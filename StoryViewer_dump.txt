@@ -1,0 +1,1468 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { X, ChevronLeft, ChevronRight, Download, Play, MessageSquare, Image as ImageIcon, Video as VideoIcon, Mic, Eye, Search, Send, Heart, Smile, Loader2, Trash2 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { useSocket } from '../context/SocketContext';
+const StoryViewer = ({ storyGroup, onClose, onUserClick }) => {
+    const { user: currentUser } = useAuth();
+    const { socket } = useSocket();
+    const [currentIndex, setCurrentIndex] = useState(0);
+    const [progress, setProgress] = useState(0);
+    const [isDownloaded, setIsDownloaded] = useState(false);
+    const [showViewers, setShowViewers] = useState(false);
+    const [isHoldPaused, setIsHoldPaused] = useState(false);
+    const [showSearch, setShowSearch] = useState(false);
+    const [searchQuery, setSearchQuery] = useState('');
+    // Reply & Reaction States
+    const [replyText, setReplyText] = useState('');
+    const [isRecordingReply, setIsRecordingReply] = useState(false);
+    const [recordingReplyDuration, setRecordingReplyDuration] = useState(0);
+    const [isUploadingReply, setIsUploadingReply] = useState(false);
+    const [toastMsg, setToastMsg] = useState('');
+    const [activeReplyMode, setActiveReplyMode] = useState(null); // 'comment', 'reaction', or null
+    const [stories, setStories] = useState(storyGroup.stories);
+    useEffect(() => {
+        setStories(storyGroup.stories);
+    }, [storyGroup]);
+    const currentStory = stories[currentIndex] || storyGroup.stories[currentIndex];
+    const mediaRef = useRef(null);
+    const pressStartTimeRef = useRef(0);
+    // Voice recording refs
+    const replyRecorderRef = useRef(null);
+    const replyAudioChunksRef = useRef([]);
+    const replyRecordingTimerRef = useRef(null);
+    const replyStreamRef = useRef(null);
+    // Check if we need to show the download overlay
+    const needsDownload = storyGroup.user.role === 'admin' && 
+                          storyGroup.user._id !== currentUser.id && 
+                          storyGroup.user._id !== currentUser._id &&
+                          !isDownloaded;
+    // Global pause state combining all modals, input focuses, recording, and hold states
+    const isPaused = !!(needsDownload || showViewers || isHoldPaused || showSearch || activeReplyMode === 'reaction' || isRecordingReply || isUploadingReply);
+    // Record view when story changes
+    useEffect(() => {
+        if (isPaused) return;
+        fetch(`http://localhost:5000/api/stories/${currentStory._id}/view`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        }).catch(err => console.error('View record failed:', err));
+    }, [currentIndex, currentStory._id, isPaused]);
+    // Playback progress timer
+    useEffect(() => {
+        if (isPaused) return;
+        const duration = currentStory.mediaType === 'video' ? 10000 : 5000;
+        const intervalTime = 50;
+        const increment = (intervalTime / duration) * 100;
+        const timer = setInterval(() => {
+            setProgress(prev => Math.min(prev + increment, 100));
+        }, intervalTime);
+        return () => clearInterval(timer);
+    }, [currentIndex, currentStory.mediaType, isPaused]);
+    // Handle HTML5 Video/Audio elements play/pause states dynamically
+    useEffect(() => {
+        if (mediaRef.current) {
+            if (isPaused) {
+                mediaRef.current.pause();
+            } else {
+                mediaRef.current.play().catch(err => console.error("Playback resume failed:", err));
+            }
+        }
+    }, [isPaused]);
+    useEffect(() => {
+        if (progress >= 100) {
+            handleNext();
+        }
+    }, [progress]);
+    const handleNext = () => {
+        if (currentIndex < storyGroup.stories.length - 1) {
+            setCurrentIndex(prev => prev + 1);
+            setProgress(0);
+            setIsDownloaded(false); // Reset download state for next story in group
+            setShowViewers(false);
+        } else {
+            onClose();
+        }
+    };
+    const handlePrev = () => {
+        if (currentIndex > 0) {
+            setCurrentIndex(prev => prev - 1);
+            setProgress(0);
+            setIsDownloaded(false);
+            setShowViewers(false);
+        }
+    };
+    const handlePressStart = (e) => {
+        if (e && e.cancelable) e.preventDefault();
+        pressStartTimeRef.current = Date.now();
+        setIsHoldPaused(true);
+    };
+    const handlePressEnd = (e, direction) => {
+        if (e && e.cancelable) e.preventDefault();
+        const pressDuration = Date.now() - pressStartTimeRef.current;
+        setIsHoldPaused(false);
+        // If the hold was shorter than 250ms, it is considered a click/tap
+        if (pressDuration < 250) {
+            // IF ANY INTERNAL MODAL/WINDOW IS OPEN, CLOSE IT INSTEAD OF NAVIGATING!
+            if (showViewers || activeReplyMode) {
+                if (showViewers) {
+                    setShowViewers(false);
+                    setShowSearch(false);
+                    setSearchQuery('');
+                }
+                if (activeReplyMode) {
+                    setActiveReplyMode(null);
+                }
+                return;
+            }
+            if (direction === 'next') {
+                handleNext();
+            } else if (direction === 'prev') {
+                handlePrev();
+            }
+        }
+    };
+    const getReactionActionText = (emoji) => {
+        switch (emoji) {
+            case '👍': return 'Liked your status';
+            case '❤️': return 'Loved your status';
+            case '😂': return 'Laughed at your status';
+            case '😮': return 'Wow\'d your status';
+            case '😢': return 'Sad about your status';
+            case '🙏': return 'Prayed for your status';
+            case '🔥': return 'Fired up your status';
+            case '👏': return 'Applauded your status';
+            default: return `Reacted ${emoji} to status`;
+        }
+    };
+    const filteredViewers = currentStory.viewers?.filter(viewer => {
+        if (!searchQuery.trim()) return true;
+        const query = searchQuery.toLowerCase().trim();
+        return (
+            viewer.displayName?.toLowerCase().includes(query) ||
+            viewer.username?.toLowerCase().includes(query) ||
+            viewer._id?.toLowerCase().includes(query)
+        );
+    }) || [];
+     // Toast auto-clear effect
+     useEffect(() => {
+         if (toastMsg) {
+             const timer = setTimeout(() => setToastMsg(''), 2000);
+             return () => clearTimeout(timer);
+         }
+     }, [toastMsg]);
+     // Listen for real-time status reactions
+     useEffect(() => {
+         if (!socket) return;
+         const handleStoryReaction = ({ storyId, user, emoji }) => {
+             setStories(prevStories => {
+                 return prevStories.map(story => {
+                     if (story._id === storyId) {
+                         const updatedReactions = [...(story.reactions || [])];
+                         const existingIdx = updatedReactions.findIndex(r => (r.user._id || r.user)?.toString() === user._id?.toString());
+                         if (existingIdx > -1) {
+                             updatedReactions[existingIdx] = { ...updatedReactions[existingIdx], emoji };
+                         } else {
+                             updatedReactions.push({ user, emoji });
+                         }
+                         return { ...story, reactions: updatedReactions };
+                     }
+                     return story;
+                 });
+             });
+         };
+         const handleStoryReactionRemoved = ({ storyId, userId }) => {
+             setStories(prevStories => {
+                 return prevStories.map(story => {
+                     if (story._id === storyId) {
+                         const updatedReactions = (story.reactions || []).filter(r => (r.user._id || r.user?.id || r.user)?.toString() !== userId?.toString());
+                         return { ...story, reactions: updatedReactions };
+                      }
+                      return story;
+                  });
+              });
+          };
+          socket.on('story_reaction', handleStoryReaction);
+          socket.on('story_reaction_removed', handleStoryReactionRemoved);
+          return () => {
+              socket.off('story_reaction', handleStoryReaction);
+              socket.off('story_reaction_removed', handleStoryReactionRemoved);
+          };
+      }, [socket]);
+     // Send Reaction (HTTP API instead of Socket Message, hiding it from normal chat!)
+     const handleSendReaction = async (emoji) => {
+         try {
+             const response = await fetch(`http://localhost:5000/api/stories/${currentStory._id}/react`, {
+                 method: 'POST',
+                 headers: {
+                     'Content-Type': 'application/json',
+                     'Authorization': `Bearer ${localStorage.getItem('token')}`
+                 },
+                 body: JSON.stringify({ emoji })
+             });
+             if (!response.ok) throw new Error('Failed to react');
+             const data = await response.json();
+             // Update local state for immediate feedback
+             setStories(prevStories => {
+                 return prevStories.map(story => {
+                     if (story._id === currentStory._id) {
+                         const updatedReactions = [...(story.reactions || [])];
+                         const existingIdx = updatedReactions.findIndex(r => (r.user._id || r.user)?.toString() === currentUser.id || (r.user._id || r.user)?.toString() === currentUser._id);
+                         if (existingIdx > -1) {
+                             updatedReactions[existingIdx] = { ...updatedReactions[existingIdx], emoji };
+                         } else {
+                             updatedReactions.push({ user: currentUser, emoji });
+                         }
+                         return { ...story, reactions: updatedReactions };
+                     }
+                     return story;
+                 });
+             });
+             setToastMsg(`Reaction sent! ${emoji}`);
+         } catch (err) {
+             console.error('Story reaction failed:', err);
+             setToastMsg('❌ Failed to send reaction');
+         }
+     };
+
+     // Remove Reaction (HTTP DELETE API)
+     const handleRemoveReaction = async () => {
+         try {
+             const response = await fetch(`http://localhost:5000/api/stories/${currentStory._id}/react`, {
+                 method: 'DELETE',
+                 headers: {
+                     'Authorization': `Bearer ${localStorage.getItem('token')}`
+                 }
+             });
+             if (!response.ok) throw new Error('Failed to remove reaction');
+             const data = await response.json();
+             
+             // Update local state for immediate feedback
+             setStories(prevStories => {
+                 return prevStories.map(story => {
+                     if (story._id === currentStory._id) {
+                         const updatedReactions = (story.reactions || []).filter(r => (r.user._id || r.user?.id || r.user)?.toString() !== currentUser.id && (r.user._id || r.user?.id || r.user)?.toString() !== currentUser._id);
+                         return { ...story, reactions: updatedReactions };
+                     }
+                     return story;
+                 });
+             });
+             
+             setToastMsg('Reaction removed');
+         } catch (err) {
+             console.error('Story reaction removal failed:', err);
+             setToastMsg('❌ Failed to remove reaction');
+         }
+     };
+    // Send Comment/Reply Text
+    const handleSendComment = () => {
+        if (!replyText.trim() || !socket) return;
+        socket.emit('send_message', {
+            recipientId: storyGroup.user._id,
+            content: `${replyText} (Reply to status)`,
+            type: 'text'
+        });
+        setReplyText('');
+        setIsHoldPaused(false); // Resume playback if it was paused on input focus
+        setToastMsg('Comment sent! ✨');
+    };
+    // Start Voice Recording
+    const startRecordingReply = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            replyStreamRef.current = stream;
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus'
+                : 'audio/webm';
+            const recorder = new MediaRecorder(stream, { mimeType });
+            replyRecorderRef.current = recorder;
+            replyAudioChunksRef.current = [];
+            recorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) {
+                    replyAudioChunksRef.current.push(e.data);
+                }
+            };
+            recorder.start();
+            setIsRecordingReply(true);
+            setIsHoldPaused(true); // Pause status play while recording
+            setRecordingReplyDuration(0);
+            replyRecordingTimerRef.current = setInterval(() => {
+                setRecordingReplyDuration(prev => prev + 1);
+            }, 1000);
+        } catch (err) {
+            console.error('Failed to start audio recording:', err);
+            setToastMsg('❌ Microphone access denied');
+        }
+    };
+    // Stop and Upload/Cancel Voice Recording
+    const stopRecordingReply = async (shouldSend = true) => {
+        if (!replyRecorderRef.current || replyRecorderRef.current.state === 'inactive') return;
+        clearInterval(replyRecordingTimerRef.current);
+        // Stop recording
+        replyRecorderRef.current.stop();
+        // Stop all media stream tracks to release microphone
+        if (replyStreamRef.current) {
+            replyStreamRef.current.getTracks().forEach(track => track.stop());
+        }
+        if (!shouldSend) {
+            setIsRecordingReply(false);
+            setIsHoldPaused(false);
+            setToastMsg('🗑️ Recording cancelled');
+            return;
+        }
+        setIsUploadingReply(true);
+        // Wait a tiny bit for the onstop / chunks to finalize
+        setTimeout(async () => {
+            try {
+                const audioBlob = new Blob(replyAudioChunksRef.current, { type: 'audio/webm' });
+                const formData = new FormData();
+                formData.append('file', audioBlob, 'voice_reply.webm');
+                const uploadResp = await fetch('http://localhost:5000/api/files/upload', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                    },
+                    body: formData
+                });
+                if (!uploadResp.ok) throw new Error('Upload failed');
+                const uploadData = await uploadResp.json();
+                // Send voice note message through socket
+                if (socket) {
+                    socket.emit('send_message', {
+                        recipientId: storyGroup.user._id,
+                        content: '🎤 Voice reply to status',
+                        type: 'audio',
+                        fileId: uploadData.fileId,
+                        fileMetadata: {
+                            name: 'Voice reply.webm',
+                            size: audioBlob.size,
+                            mimeType: 'audio/webm'
+                        }
+                    });
+                }
+                setToastMsg('🎤 Voice reply sent!');
+            } catch (error) {
+                console.error('Failed to send voice reply:', error);
+                setToastMsg('❌ Voice reply failed to send');
+            } finally {
+                setIsRecordingReply(false);
+                setIsUploadingReply(false);
+                setIsHoldPaused(false);
+            }
+        }, 300);
+    };
+    const formatMediaSize = () => {
+        // Mock size for effect
+        return currentStory.mediaType === 'video' ? '4.2 MB' : '850 KB';
+    };
+    return (
+        <div style={{
+            position: 'fixed',
+            inset: 0,
+            background: '#000',
+            zIndex: 2000,
+            display: 'flex',
+            flexDirection: 'column',
+            animation: 'fadeIn 0.3s ease'
+        }}>
+            {/* Progress Bars */}
+            <div style={{
+                position: 'absolute',
+                top: '16px',
+                left: '10px',
+                right: '10px',
+                display: 'flex',
+                gap: '4px',
+                zIndex: 10
+            }}>
+                {storyGroup.stories.map((_, idx) => (
+                    <div key={idx} style={{
+                        flex: 1,
+                        height: '2px',
+                        background: 'rgba(255,255,255,0.3)',
+                        borderRadius: '1px',
+                        overflow: 'hidden'
+                    }}>
+                        <div style={{
+                            height: '100%',
+                            background: '#FFF',
+                            width: idx < currentIndex ? '100%' : (idx === currentIndex ? `${progress}%` : '0%'),
+                            transition: idx === currentIndex ? 'none' : 'width 0.1s'
+                        }} />
+                    </div>
+                ))}
+            </div>
+            {/* Header */}
+            <div style={{
+                position: 'absolute',
+                top: '28px',
+                left: '16px',
+                right: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                zIndex: 20
+            }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div onClick={handlePrev} style={{ color: '#FFF', padding: '10px', cursor: 'pointer' }}>
+                       <ChevronLeft size={24} />
+                    </div>
+                    <img 
+                        src={storyGroup.user.profilePicture ? (storyGroup.user.profilePicture.startsWith('http') ? storyGroup.user.profilePicture : `http://localhost:5000/api/files/${storyGroup.user.profilePicture}?token=${localStorage.getItem('token')}`) : `http://localhost:5000/api/avatar?name=${storyGroup.user.displayName}&background=random&color=fff`} 
+                        style={{ width: '40px', height: '40px', borderRadius: '50%', border: '1.2px solid #FFF' }} 
+                        alt="" 
+                    />
+                    <div>
+                        <div style={{ color: '#FFF', fontWeight: '700', fontSize: '15px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span>{storyGroup.user.displayName}</span>
+                            {storyGroup.user.role === 'admin' && (
+                                <span style={{ 
+                                    fontSize: '9px', 
+                                    fontWeight: '900',
+                                    background: 'linear-gradient(135deg, #FFD700 0%, #FFA500 100%)', 
+                                    color: '#000',
+                                    padding: '2px 8px', 
+                                    borderRadius: '12px',
+                                    boxShadow: '0 2px 8px rgba(255, 215, 0, 0.4)',
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.5px',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '3px',
+                                    border: '1.2px solid rgba(255, 255, 255, 0.5)'
+                                }}>
+                                    👑 Admin Pro
+                                </span>
+                            )}
+                        </div>
+                        <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: '12px' }}>
+                            {new Date(currentStory.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </div>
+                    </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+             });
+             
+             setToastMsg('Reaction removed');
+         } catch (err) {
+             console.error('Story reaction removal failed:', err);
+             setToastMsg('❌ Failed to remove reaction');
+         }
+     };
+    // Send Comment/Reply Text
+    const handleSendComment = () => {
+        if (!replyText.trim() || !socket) return;
+        socket.emit('send_message', {
+            recipientId: storyGroup.user._id,
+            content: `${replyText} (Reply to status)`,
+            type: 'text'
+        });
+        setReplyText('');
+        setIsHoldPaused(false); // Resume playback if it was paused on input focus
+        setToastMsg('Comment sent! ✨');
+    };
+    // Start Voice Recording
+    const startRecordingReply = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            replyStreamRef.current = stream;
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus'
+                : 'audio/webm';
+            const recorder = new MediaRecorder(stream, { mimeType });
+            replyRecorderRef.current = recorder;
+            replyAudioChunksRef.current = [];
+            recorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) {
+                    replyAudioChunksRef.current.push(e.data);
+                }
+            };
+            recorder.start();
+            setIsRecordingReply(true);
+            setIsHoldPaused(true); // Pause status play while recording
+            setRecordingReplyDuration(0);
+            replyRecordingTimerRef.current = setInterval(() => {
+                setRecordingReplyDuration(prev => prev + 1);
+            }, 1000);
+        } catch (err) {
+            console.error('Failed to start audio recording:', err);
+            setToastMsg('❌ Microphone access denied');
+        }
+    };
+    // Stop and Upload/Cancel Voice Recording
+    const stopRecordingReply = async (shouldSend = true) => {
+        if (!replyRecorderRef.current || replyRecorderRef.current.state === 'inactive') return;
+        clearInterval(replyRecordingTimerRef.current);
+        // Stop recording
+        replyRecorderRef.current.stop();
+        // Stop all media stream tracks to release microphone
+        if (replyStreamRef.current) {
+            replyStreamRef.current.getTracks().forEach(track => track.stop());
+        }
+        if (!shouldSend) {
+            setIsRecordingReply(false);
+            setIsHoldPaused(false);
+            setToastMsg('🗑️ Recording cancelled');
+            return;
+        }
+        setIsUploadingReply(true);
+        // Wait a tiny bit for the onstop / chunks to finalize
+        setTimeout(async () => {
+            try {
+                const audioBlob = new Blob(replyAudioChunksRef.current, { type: 'audio/webm' });
+                const formData = new FormData();
+                formData.append('file', audioBlob, 'voice_reply.webm');
+                const uploadResp = await fetch('http://localhost:5000/api/files/upload', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                    },
+                    body: formData
+                });
+                if (!uploadResp.ok) throw new Error('Upload failed');
+                const uploadData = await uploadResp.json();
+                // Send voice note message through socket
+                if (socket) {
+                    socket.emit('send_message', {
+                        recipientId: storyGroup.user._id,
+                        content: '🎤 Voice reply to status',
+                        type: 'audio',
+                        fileId: uploadData.fileId,
+                        fileMetadata: {
+                            name: 'Voice reply.webm',
+                            size: audioBlob.size,
+                            mimeType: 'audio/webm'
+                        }
+                    });
+                }
+                setToastMsg('🎤 Voice reply sent!');
+            } catch (error) {
+                console.error('Failed to send voice reply:', error);
+                setToastMsg('❌ Voice reply failed to send');
+            } finally {
+                setIsRecordingReply(false);
+                setIsUploadingReply(false);
+                setIsHoldPaused(false);
+            }
+        }, 300);
+    };
+    const formatMediaSize = () => {
+        // Mock size for effect
+        return currentStory.mediaType === 'video' ? '4.2 MB' : '850 KB';
+    };
+    return (
+        <div style={{
+            position: 'fixed',
+            inset: 0,
+            background: '#000',
+            zIndex: 2000,
+            display: 'flex',
+            flexDirection: 'column',
+            animation: 'fadeIn 0.3s ease'
+        }}>
+            {/* Progress Bars */}
+            <div style={{
+                position: 'absolute',
+                top: '16px',
+                left: '10px',
+                right: '10px',
+                display: 'flex',
+                gap: '4px',
+                zIndex: 10
+            }}>
+                {storyGroup.stories.map((_, idx) => (
+                    <div key={idx} style={{
+                        flex: 1,
+                        height: '2px',
+                        background: 'rgba(255,255,255,0.3)',
+                        borderRadius: '1px',
+                        overflow: 'hidden'
+                    }}>
+                        <div style={{
+                            height: '100%',
+                            background: '#FFF',
+                            width: idx < currentIndex ? '100%' : (idx === currentIndex ? `${progress}%` : '0%'),
+                            transition: idx === currentIndex ? 'none' : 'width 0.1s'
+                        }} />
+                    </div>
+                ))}
+            </div>
+            {/* Header */}
+            <div style={{
+                position: 'absolute',
+                top: '28px',
+                left: '16px',
+                right: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                zIndex: 20
+            }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div onClick={handlePrev} style={{ color: '#FFF', padding: '10px', cursor: 'pointer' }}>
+                       <ChevronLeft size={24} />
+                    </div>
+                    <img 
+                        src={storyGroup.user.profilePicture ? (storyGroup.user.profilePicture.startsWith('http') ? storyGroup.user.profilePicture : `http://localhost:5000/api/files/${storyGroup.user.profilePicture}?token=${localStorage.getItem('token')}`) : `http://localhost:5000/api/avatar?name=${storyGroup.user.displayName}&background=random&color=fff`} 
+                        style={{ width: '40px', height: '40px', borderRadius: '50%', border: '1.2px solid #FFF' }} 
+                        alt="" 
+                    />
+                    <div>
+                        <div style={{ color: '#FFF', fontWeight: '700', fontSize: '15px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span>{storyGroup.user.displayName}</span>
+                            {storyGroup.user.role === 'admin' && (
+                                <span style={{ 
+                                    fontSize: '9px', 
+                                    fontWeight: '900',
+                                    background: 'linear-gradient(135deg, #FFD700 0%, #FFA500 100%)', 
+                                    color: '#000',
+                                    padding: '2px 8px', 
+                                    borderRadius: '12px',
+                                    boxShadow: '0 2px 8px rgba(255, 215, 0, 0.4)',
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.5px',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '3px',
+                                    border: '1.2px solid rgba(255, 255, 255, 0.5)'
+                                }}>
+                                    👑 Admin Pro
+                                </span>
+                            )}
+                        </div>
+                        <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: '12px' }}>
+                            {new Date(currentStory.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </div>
+                    </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.1)', border: 'none', color: '#FFF', width: '36px', height: '36px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+                        <X size={20} />
+                    </button>
+                </div>
+            </div>
+            {/* Content Area */}
+            {needsDownload ? (
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.8)', zIndex: 20 }}>
+                    <div style={{ textAlign: 'center', color: '#FFF', zIndex: 15, padding: '40px' }}>
+                        <div style={{ 
+                            width: '80px', 
+                            height: '80px', 
+                            background: 'rgba(255,255,255,0.1)', 
+                            borderRadius: '50%', 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            justifyContent: 'center', 
+                            margin: '0 auto 20px',
+                            border: '1px solid rgba(255,255,255,0.2)',
+                            cursor: 'pointer'
+                        }} onClick={() => setIsDownloaded(true)}>
+                            {currentStory.mediaType === 'video' && <VideoIcon size={32} />}
+                            {currentStory.mediaType === 'image' && <ImageIcon size={32} />}
+                            {currentStory.mediaType === 'voice' && <Mic size={32} />}
+                            {currentStory.mediaType === 'text' && <MessageSquare size={32} />}
+                        </div>
+                        <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '8px' }}>
+                            Admin {currentStory.mediaType.charAt(0).toUpperCase() + currentStory.mediaType.slice(1)} Update
+                        </h3>
+                        <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '14px', marginBottom: '24px' }}>
+                            {currentStory.mediaType === 'video' && 'Video File • 4.2 MB'}
+                            {currentStory.mediaType === 'image' && 'Image File • 850 KB'}
+                            {currentStory.mediaType === 'voice' && 'Voice Note • 320 KB'}
+                            {currentStory.mediaType === 'text' && 'Status Message'}
+                        </p>
+                        <button 
+                            onClick={() => setIsDownloaded(true)}
+                            style={{ 
+                                background: 'var(--primary)', 
+                                border: 'none', 
+                                color: '#FFF', 
+                                padding: '12px 32px', 
+                                borderRadius: '24px', 
+                                fontSize: '15px', 
+                                fontWeight: '700',
+                                boxShadow: '0 4px 15px rgba(0,122,255,0.3)'
+                            }}
+                        >
+                            Download
+                        </button>
+                    </div>
+                ) : (
+                    <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+                        {currentStory.mediaType === 'video' && (
+                            <video 
+                                ref={mediaRef}
+                                src={`http://localhost:5000/api/files/${currentStory.fileId}?token=${localStorage.getItem('token')}`}
+                                autoPlay
+                                playsInline
+                                style={{ maxWidth: '100%', maxHeight: '100%' }}
+                            />
+                        )}
+                        {currentStory.mediaType === 'image' && (
+                            <img 
+                                src={`http://localhost:5000/api/files/${currentStory.fileId}?token=${localStorage.getItem('token')}`}
+                                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                                alt="Status Update"
+                            />
+                        )}
+                        {currentStory.mediaType === 'voice' && (
+                            <div style={{ textAlign: 'center', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                                <style>{`
+                                    @keyframes soundwave {
+                                        0% { height: 8px; opacity: 0.4; }
+                                        50% { height: 48px; opacity: 1; }
+                                        100% { height: 8px; opacity: 0.4; }
+                                    }
+                                    @keyframes pulse-ring {
+                                        0% { transform: scale(1); opacity: 0.5; }
+                                        100% { transform: scale(1.8); opacity: 0; }
+                                    }
+                                `}</style>
+                                <div style={{ position: 'relative', margin: '0 auto 40px', width: '140px', height: '140px' }}>
+                                    {!isPaused && (
+                                        <>
+                                            <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: 'var(--primary)', animation: 'pulse-ring 2s cubic-bezier(0, 0, 0.2, 1) infinite' }}></div>
+                                            <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: 'var(--primary)', animation: 'pulse-ring 2s cubic-bezier(0, 0, 0.2, 1) infinite', animationDelay: '1s' }}></div>
+                                        </>
+                                    )}
+                                    <div style={{ 
+                                        position: 'relative',
+                                        width: '140px', 
+                                        height: '140px', 
+                                        background: 'linear-gradient(135deg, var(--primary) 0%, #8A2BE2 100%)', 
+                                        borderRadius: '50%', 
+                                        display: 'flex', 
+                                        alignItems: 'center', 
+                                        justifyContent: 'center',
+                                        boxShadow: '0 10px 30px rgba(0,0,0,0.5), inset 0 -5px 15px rgba(0,0,0,0.3)',
+                                        zIndex: 2,
+                                        transform: isPaused ? 'scale(0.95)' : 'scale(1)',
+                                        transition: 'transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)'
+                                    }}>
+                                        <Mic size={56} color="#FFF" />
+                                    </div>
+                                </div>
+                                <div style={{ display: 'flex', gap: '5px', alignItems: 'center', height: '60px', marginBottom: '30px' }}>
+                                    {[...Array(24)].map((_, i) => {
+                                        const dur = 0.5 + (i % 3) * 0.2 + (i % 2) * 0.1;
+                                        const del = (i % 5) * 0.1;
+                                        return (
+                                            <div 
+                                                key={i}
+                                                style={{
+                                                    width: '5px',
+                                                    background: '#FFF',
+                                                    borderRadius: '4px',
+                                                    height: isPaused ? '8px' : '24px', 
+                                                    animation: isPaused ? 'none' : `soundwave ${dur}s ease-in-out infinite alternate`,
+                                                    animationDelay: `${del}s`,
+                                                    transition: 'all 0.3s ease'
+                                                }}
+                                            />
+                                        )
+                                    })}
+                                </div>
+                                <div style={{ 
+                                    background: 'rgba(0,0,0,0.3)', 
+                                    padding: '8px 24px', 
+                                    borderRadius: '20px',
+                                    backdropFilter: 'blur(10px)',
+                                    WebkitBackdropFilter: 'blur(10px)',
+                                    color: 'rgba(255,255,255,0.9)',
+                                    fontSize: '14px',
+                                    fontWeight: '600',
+                                    letterSpacing: '1.5px',
+                                    textTransform: 'uppercase'
+                                }}>
+                                    {isPaused ? 'Paused' : 'Playing Voice Note'}
+                                </div>
+                                <audio 
+                                    ref={mediaRef}
+                                    src={`http://localhost:5000/api/files/${currentStory.fileId}?token=${localStorage.getItem('token')}`}
+                                    autoPlay
+                                    style={{ display: 'none' }}
+                                />
+                            </div>
+                        )}
+                        {currentStory.mediaType === 'text' && (
+                            <div style={{ 
+                                background: currentStory.bgColor || '#34C759', 
+                                width: '100%', 
+                                height: '100%', 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                justifyContent: 'center', 
+                                padding: '40px',
+                                textAlign: 'center',
+                                fontSize: currentStory.fontSize || '28px',
+                                fontWeight: '600',
+                                color: currentStory.fontColor || '#FFF',
+                                fontFamily: currentStory.fontFamily || 'inherit',
+                                lineBreak: 'anywhere'
+                            }}>
+                                {currentStory.caption}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+            {/* Nav Overlays (Next/Prev) */}
+            {!needsDownload && (
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', zIndex: 5 }}>
+                    <div 
+                        onMouseDown={handlePressStart}
+                        onMouseUp={(e) => handlePressEnd(e, 'prev')}
+                        onMouseLeave={() => isHoldPaused && setIsHoldPaused(false)}
+                        onTouchStart={handlePressStart}
+                        onTouchEnd={(e) => handlePressEnd(e, 'prev')}
+                        style={{ flex: 1, cursor: 'pointer' }} 
+                    />
+                    <div 
+                        onMouseDown={handlePressStart}
+                        onMouseUp={(e) => handlePressEnd(e, 'next')}
+                        onMouseLeave={() => isHoldPaused && setIsHoldPaused(false)}
+                        onTouchStart={handlePressStart}
+                        onTouchEnd={(e) => handlePressEnd(e, 'next')}
+                        style={{ flex: 1, cursor: 'pointer' }} 
+                    />
+                </div>
+            )}
+            )}
+            {/* Footer / Caption */}
+            {currentStory.caption && !needsDownload && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: '0',
+                    left: 0,
+                    right: 0,
+                    padding: '40px 20px 60px',
+                    textAlign: 'center',
+                    color: '#FFF',
+                    background: 'linear-gradient(transparent, rgba(0,0,0,0.8))',
+                    fontSize: '16px',
+                    zIndex: 10
+                }}>
+                    {currentStory.caption}
+                </div>
+            )}
+            {/* Viewers Button (Only for Story Owner) */}
+            {(storyGroup.user._id === currentUser.id || storyGroup.user._id === currentUser._id) && !needsDownload && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: '20px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    zIndex: 25,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    cursor: 'pointer',
+                    color: '#FFF'
+                }} onClick={() => setShowViewers(true)}>
+                    <Eye size={24} />
+                    <span style={{ fontSize: '12px', marginTop: '4px', fontWeight: 'bold' }}>{currentStory.viewers?.length || 0} views</span>
+                </div>
+            )}
+            {/* Viewers Modal */}
+            {showViewers && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    height: '65%',
+                    background: 'rgba(28, 28, 30, 0.85)',
+                    backdropFilter: 'blur(30px) saturate(150%)',
+                    WebkitBackdropFilter: 'blur(30px) saturate(150%)',
+                    borderTopLeftRadius: '32px',
+                    borderTopRightRadius: '32px',
+                    zIndex: 3000,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    animation: 'slideUp 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)',
+                    boxShadow: '0 -10px 40px rgba(0,0,0,0.4)',
+                    borderTop: '1px solid rgba(255,255,255,0.1)'
+                }} onClick={(e) => e.stopPropagation()}>
+                    {/* Drag Handle */}
+                    <div style={{ width: '100%', display: 'flex', justifyContent: 'center', paddingTop: '12px', paddingBottom: '4px' }}>
+                        <div style={{ width: '40px', height: '5px', background: 'rgba(255,255,255,0.3)', borderRadius: '10px' }}></div>
+                    </div>
+                    <div style={{ padding: '10px 24px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#FFF' }}>
+                        <div>
+                            <h3 style={{ margin: 0, fontSize: '20px', fontWeight: '700', letterSpacing: '-0.5px' }}>Views</h3>
+                            <p style={{ margin: '4px 0 0 0', fontSize: '14px', color: 'rgba(255,255,255,0.6)' }}>{currentStory.viewers?.length || 0} people viewed this</p>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            {/* Search Button */}
+                            <button 
+                                onClick={() => {
+                                    setShowSearch(!showSearch);
+                                    if (showSearch) setSearchQuery(''); // reset search query on close
+                                }} 
+                                style={{ 
+                                    background: showSearch ? 'var(--primary)' : 'rgba(255,255,255,0.1)', 
+                                    border: 'none', 
+                                    width: '32px', 
+                                    height: '32px', 
+                                    borderRadius: '50%', 
+                                    display: 'flex', 
+                                    alignItems: 'center', 
+                                    justifyContent: 'center', 
+                                    color: '#FFF', 
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s'
+                                }}>
+                                <Search size={18} />
+                            </button>
+                            <button 
+                                onClick={() => {
+                                    setShowViewers(false);
+                                    setShowSearch(false);
+                                    setSearchQuery('');
+                                }} 
+                                style={{ 
+                                    background: 'rgba(255,255,255,0.1)', 
+                                    border: 'none', 
+                                    width: '32px', 
+                                    height: '32px', 
+                                    borderRadius: '50%', 
+                                    display: 'flex', 
+                                    alignItems: 'center', 
+                                    justifyContent: 'center', 
+                                    color: '#FFF', 
+                                    cursor: 'pointer' 
+                                }}>
+                                <X size={18} />
+                            </button>
+                        </div>
+                    </div>
+                    {/* Search Pad */}
+                    {showSearch && (
+                        <div style={{ padding: '0 24px 15px' }}>
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                background: 'rgba(255, 255, 255, 0.08)',
+                                borderRadius: '14px',
+                                padding: '8px 14px',
+                                border: '1px solid rgba(255, 255, 255, 0.1)',
+                                transition: 'all 0.3s ease'
+                            }}>
+                                <Search size={16} style={{ color: 'rgba(255,255,255,0.5)', marginRight: '10px' }} />
+                                <input 
+                                    type="text"
+                                    placeholder="Search by ID or name..."
+                                    value={searchQuery}
+                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                    style={{
+                                        background: 'none',
+                                        border: 'none',
+                                        color: '#FFF',
+                                        outline: 'none',
+                                        fontSize: '14px',
+                                        width: '100%'
+                                    }}
+                                    autoFocus
+                                />
+                                {searchQuery && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        {filteredViewers.length === 0 && (
+                                            <span style={{ 
+                                                color: '#FF453A', 
+                                                fontSize: '12px', 
+                                                fontWeight: '600', 
+                                                background: 'rgba(255, 69, 58, 0.15)',
+                                                padding: '2px 8px',
+                                                borderRadius: '6px',
+                                                whiteSpace: 'nowrap'
+                                            }}>
+                                                Not Found
+                                            </span>
+                                        )}
+                                        <X 
+                                            size={16} 
+                                            onClick={() => setSearchQuery('')}
+                                            style={{ color: 'rgba(255,255,255,0.5)', cursor: 'pointer' }} 
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                    <div style={{ flex: 1, overflowY: 'auto', padding: '0 24px 24px' }} className="hide-scrollbar">
+                        {filteredViewers.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                {filteredViewers.map((viewer, idx) => {
+                                    const viewerId = (viewer._id || viewer.id)?.toString();
+                                    const reaction = currentStory.reactions?.find(r => (r.user?._id || r.user?.id || r.user)?.toString() === viewerId);
+                                    return (
+                                        <div key={idx} 
+                                            onClick={() => onUserClick && onUserClick(viewer)}
+                                            style={{ 
+                                                display: 'flex', 
+                                                alignItems: 'center', 
+                                                gap: '14px',
+                                                background: 'rgba(255,255,255,0.05)',
+                                                padding: '12px 16px',
+                                                borderRadius: '16px',
+                                                transition: 'background 0.2s',
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            <div>
+                                                <img 
+                                                    src={viewer.profilePicture ? (viewer.profilePicture.startsWith('http') ? viewer.profilePicture : `http://localhost:5000/api/files/${viewer.profilePicture}?token=${localStorage.getItem('token')}`) : `http://localhost:5000/api/avatar?name=${viewer.displayName}&background=random&color=fff`}
+                                                    style={{ width: '48px', height: '48px', borderRadius: '50%', objectFit: 'cover', border: '1px solid rgba(255,255,255,0.1)' }}
+                                                    alt=""
+                                                />
+                                            </div>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                    <span style={{ color: '#FFF', fontSize: '16px', fontWeight: '600' }}>
+                                                        {viewer.displayName}
+                                                    </span>
+                                                    {reaction && (
+                                                        <span style={{
+                                                            fontSize: '9px',
+                                                            fontWeight: '900',
+                                                            background: 'rgba(48, 209, 88, 0.15)',
+                                                            color: '#30D158',
+                                                            padding: '2px 8px',
+                                                            borderRadius: '12px',
+                                                            textTransform: 'uppercase',
+                                                            letterSpacing: '0.5px',
+                                                            display: 'inline-flex',
+                                                            alignItems: 'center',
+                                                            border: '1px solid rgba(48, 209, 88, 0.25)'
+                                                        }}>
+                                                            Reacted
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div style={{ color: reaction ? '#30D158' : 'rgba(255,255,255,0.5)', fontSize: '13px', marginTop: '3px', fontWeight: reaction ? '700' : 'normal' }}>
+                                                    {reaction ? getReactionActionText(reaction.emoji) : 'Viewed your status'}
+                                                </div>
+                                            </div>
+                                            {reaction && (
+                                                <div style={{
+                                                    fontSize: '28px',
+                                                    filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.4))',
+                                                    animation: 'popEmoji 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.3)',
+                                                    userSelect: 'none',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    marginLeft: '12px',
+                                                    cursor: 'default'
+                                                }}>
+                                                    {reaction.emoji}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : searchQuery ? (
+                            <div style={{ color: 'rgba(255,255,255,0.5)', textAlign: 'center', marginTop: '40px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                                <Search size={48} style={{ opacity: 0.3, marginBottom: '16px', color: '#FF453A' }} />
+                                <span style={{ fontSize: '16px', fontWeight: '600', color: '#FF453A' }}>Not Found in Views</span>
+                                <span style={{ fontSize: '13px', color: 'rgba(255,255,255,0.4)', marginTop: '4px' }}>This user has not viewed your status yet.</span>
+                            </div>
+                        ) : (
+                            <div style={{ color: 'rgba(255,255,255,0.5)', textAlign: 'center', marginTop: '40px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                                <Eye size={48} style={{ opacity: 0.3, marginBottom: '16px' }} />
+                                <span style={{ fontSize: '16px' }}>No views yet</span>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+            {/* Custom Keyframes for Animations */}
+            <style>{`
+                @keyframes pulse {
+                    0% { transform: scale(1); opacity: 1; }
+                    50% { transform: scale(1.3); opacity: 0.5; }
+                    100% { transform: scale(1); opacity: 1; }
+                }
+                .animate-spin {
+                    animation: spin 1s linear infinite;
+                }
+                @keyframes spin {
+                    from { transform: rotate(0deg); }
+                    to { transform: rotate(360deg); }
+                }
+            `}</style>
+            {/* Toast Notification */}
+            {toastMsg && (
+                <div style={{
+                    position: 'absolute',
+                    top: '80px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    zIndex: 4000,
+                    background: 'rgba(52, 199, 89, 0.95)',
+                    color: '#FFF',
+                    padding: '8px 18px',
+                    borderRadius: '24px',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    boxShadow: '0 8px 25px rgba(52, 199, 89, 0.4)',
+                    backdropFilter: 'blur(10px)',
+                    WebkitBackdropFilter: 'blur(10px)',
+                    animation: 'fadeIn 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                }}>
+                    <span style={{ fontSize: '16px' }}>✨</span>
+                    <span>{toastMsg}</span>
+                </div>
+            )}
+            {/* Viewer's Own Reaction Badge */}
+            {(storyGroup.user._id !== currentUser.id && storyGroup.user._id !== currentUser._id) && !needsDownload && !showViewers && (() => {
+                const myIdStr = (currentUser?.id || currentUser?._id)?.toString();
+                const myReaction = currentStory.reactions?.find(r => (r.user?._id || r.user?.id || r.user)?.toString() === myIdStr);
+                if (!myReaction) return null;
+                return (
+                    <div style={{
+                        position: 'absolute',
+                        bottom: '90px',
+                        right: '24px',
+                        zIndex: 35,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        background: 'rgba(255, 255, 255, 0.12)',
+                        backdropFilter: 'blur(20px)',
+                        WebkitBackdropFilter: 'blur(20px)',
+                        padding: '8px 14px',
+                        borderRadius: '20px',
+                        border: '1px solid rgba(255, 255, 255, 0.2)',
+                        boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+                        animation: 'bounceIn 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275)'
+                    }}>
+                        <span style={{ fontSize: '20px', filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.2))' }}>{myReaction.emoji}</span>
+                        <span style={{ color: '#FFF', fontSize: '13px', fontWeight: '600', letterSpacing: '-0.2px' }}>You Reacted</span>
+                        {/* Remove Reaction Cross Icon */}
+                        <div 
+                            onClick={(e) => {
+                                e.stopPropagation(); // Prevent status skips
+                                handleRemoveReaction();
+                            }}
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                width: '18px',
+                                height: '18px',
+                                borderRadius: '50%',
+                                background: 'rgba(255, 255, 255, 0.18)',
+                                color: '#FFF',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s',
+                                marginLeft: '2px'
+                            }}
+                            onMouseEnter={(e) => {
+                                e.currentTarget.style.background = 'rgba(255, 59, 48, 0.8)';
+                                e.currentTarget.style.transform = 'scale(1.1)';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.18)';
+                                e.currentTarget.style.transform = 'scale(1)';
+                            }}
+                            title="Remove Reaction"
+                        >
+                            <X size={10} strokeWidth={3} />
+                        </div>
+                    </div>
+                );
+            })()}
+            {/* Reply & Reaction Bar (Only for viewers, not story owner) */}
+            {(storyGroup.user._id !== currentUser.id && storyGroup.user._id !== currentUser._id) && !needsDownload && !showViewers && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: '24px',
+                    left: '16px',
+                    right: '16px',
+                    zIndex: 40,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '12px',
+                    animation: 'slideUp 0.35s cubic-bezier(0.2, 0.8, 0.2, 1)'
+                }} onClick={(e) => e.stopPropagation()}>
+                    {/* Emojis Quick Reactions Float Overlay */}
+                    {activeReplyMode === 'reaction' && !isRecordingReply && !isUploadingReply && (
+                        <div style={{
+                            display: 'flex',
+                            justifyContent: 'center',
+                            gap: '14px',
+                            background: 'rgba(0, 0, 0, 0.65)',
+                            backdropFilter: 'blur(20px)',
+                            WebkitBackdropFilter: 'blur(20px)',
+                            padding: '10px 20px',
+                            borderRadius: '24px',
+                            alignSelf: 'center',
+                            border: '1px solid rgba(255,255,255,0.15)',
+                            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                            animation: 'bounceIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)'
+                        }}>
+                            {['👍', '😮', '😢', '😂', '❤️'].map((emoji) => (
+                                <button
+                                    key={emoji}
+                                    onClick={() => {
+                                        handleSendReaction(emoji);
+                                        setActiveReplyMode(null); // close emoji overlay on react
+                                    }}
+                                    style={{
+                                        background: 'none',
+                                        border: 'none',
+                                        fontSize: '26px',
+                                        cursor: 'pointer',
+                                        transition: 'transform 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+                                        padding: '4px'
+                                    }}
+                                    onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.3) translateY(-4px)'}
+                                    onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                                >
+                                    {emoji}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                    {/* Bottom bar container */}
+                    <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        width: '100%'
+                    }}>
+                        {isRecordingReply ? (
+                            // Recording View
+                            <div style={{ 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                width: '100%', 
+                                justifyContent: 'space-between',
+                                background: 'rgba(255, 255, 255, 0.08)',
+                                backdropFilter: 'blur(20px)',
+                                WebkitBackdropFilter: 'blur(20px)',
+                                padding: '10px 16px',
+                                borderRadius: '24px',
+                                border: '1px solid rgba(255, 255, 255, 0.15)',
+                                boxShadow: '0 8px 32px rgba(0,0,0,0.3)'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#FF453A' }}>
+                                    <span style={{ 
+                                        width: '8px', 
+                                        height: '8px', 
+                                        background: '#FF453A', 
+                                        borderRadius: '50%',
+                                        animation: 'pulse 1s infinite'
+                                    }} />
+                                    <span style={{ fontWeight: '600', fontSize: '14px', color: '#FFF' }}>
+                                        Recording Voice... {recordingReplyDuration}s
+                                    </span>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                    <button 
+                                        onClick={() => stopRecordingReply(false)} 
+                                        style={{ 
+                                            background: 'rgba(255, 69, 58, 0.2)', 
+                                            border: 'none', 
+                                            color: '#FF453A', 
+                                            width: '36px', 
+                                            height: '36px', 
+                                            borderRadius: '50%', 
+                                            display: 'flex', 
+                                            alignItems: 'center', 
+                                            justifyContent: 'center', 
+                                            cursor: 'pointer' 
+                                        }}
+                                        title="Cancel Recording"
+                                    >
+                                        <Trash2 size={16} />
+                                    </button>
+                                    <button 
+                                        onClick={() => stopRecordingReply(true)} 
+                                        style={{ 
+                                            background: 'var(--primary)', 
+                                            border: 'none', 
+                                            color: '#FFF', 
+                                            width: '36px', 
+                                            height: '36px', 
+                                            borderRadius: '50%', 
+                                            display: 'flex', 
+                                            alignItems: 'center', 
+                                            justifyContent: 'center', 
+                                            cursor: 'pointer' 
+                                        }}
+                                        title="Send Voice Note"
+                                    >
+                                        <Send size={16} />
+                                    </button>
+                                </div>
+                            </div>
+                        ) : isUploadingReply ? (
+                            // Uploading state
+                            <div style={{ 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                justifyContent: 'center', 
+                                width: '100%', 
+                                gap: '10px', 
+                                color: '#FFF',
+                                background: 'rgba(255, 255, 255, 0.08)',
+                                backdropFilter: 'blur(20px)',
+                                WebkitBackdropFilter: 'blur(20px)',
+                                padding: '10px 16px',
+                                borderRadius: '24px',
+                                border: '1px solid rgba(255, 255, 255, 0.15)',
+                                boxShadow: '0 8px 32px rgba(0,0,0,0.3)'
+                            }}>
+                                <Loader2 size={18} className="animate-spin" style={{ color: 'var(--primary)' }} />
+                                <span style={{ fontSize: '14px', fontWeight: '500' }}>Sending reply...</span>
+                            </div>
+                        ) : activeReplyMode === 'comment' ? (
+                            // Active Comment Input Mode
+                            <div style={{ 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                gap: '10px', 
+                                width: '100%',
+                                background: 'rgba(255, 255, 255, 0.08)',
+                                backdropFilter: 'blur(20px)',
+                                WebkitBackdropFilter: 'blur(20px)',
+                                padding: '10px 16px',
+                                borderRadius: '24px',
+                                border: '1px solid rgba(255, 255, 255, 0.15)',
+                                boxShadow: '0 8px 32px rgba(0,0,0,0.3)'
+                            }}>
+                                <input
+                                    type="text"
+                                    placeholder="Type a comment..."
+                                    value={replyText}
+                                    onChange={(e) => setReplyText(e.target.value)}
+                                    onFocus={() => setIsHoldPaused(true)}
+                                    onBlur={() => {
+                                        if (!replyText.trim()) {
+                                            setActiveReplyMode(null);
+                                            setIsHoldPaused(false);
+                                        }
+                                    }}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') handleSendComment();
+                                    }}
+                                    style={{
+                                        flex: 1,
+                                        background: 'none',
+                                        border: 'none',
+                                        color: '#FFF',
+                                        outline: 'none',
+                                        fontSize: '15px'
+                                    }}
+                                    autoFocus
+                                />
+                                <button
+                                    onClick={handleSendComment}
+                                    disabled={!replyText.trim()}
+                                    style={{
+                                        background: replyText.trim() ? 'var(--primary)' : 'rgba(255,255,255,0.1)',
+                                        border: 'none',
+                                        color: '#FFF',
+                                        width: '36px',
+                                        height: '36px',
+                                        borderRadius: '50%',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        cursor: replyText.trim() ? 'pointer' : 'default',
+                                        transition: 'all 0.2s'
+                                    }}
+                                >
+                                    <Send size={16} />
+                                </button>
+                            </div>
+                        ) : (
+                            // Default Idle View: Clean, professional single row of icons/inputs
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', width: '100%' }}>
+                                {/* Reply Input Trigger */}
+                                <div 
+                                    onClick={() => {
+                                        setActiveReplyMode('comment');
+                                        setIsHoldPaused(true);
+                                    }}
+                                    style={{
+                                        flex: 1,
+                                        background: 'rgba(255, 255, 255, 0.1)',
+                                        padding: '12px 18px',
+                                        borderRadius: '24px',
+                                        color: 'rgba(255,255,255,0.6)',
+                                        fontSize: '14px',
+                                        cursor: 'pointer',
+                                        border: '1px solid rgba(255,255,255,0.08)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px',
+                                        transition: 'all 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.15)'}
+                                    onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+                                >
+                                    <MessageSquare size={16} />
+                                    <span>Reply...</span>
+                                </div>
+                                {/* Mic Button */}
+                                <button
+                                    onClick={startRecordingReply}
+                                    style={{
+                                        background: 'rgba(255, 255, 255, 0.1)',
+                                        border: 'none',
+                                        color: '#FFF',
+                                        width: '44px',
+                                        height: '44px',
+                                        borderRadius: '50%',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        cursor: 'pointer',
+                                        border: '1px solid rgba(255,255,255,0.08)',
+                                        transition: 'all 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                                    onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                                    title="Voice Reply"
+                                >
+                                    <Mic size={18} />
+                                </button>
+                                {/* Smile / Quick Reaction Button */}
+                                <button
+                                    onClick={() => {
+                                        setActiveReplyMode(activeReplyMode === 'reaction' ? null : 'reaction');
+                                    }}
+                                    style={{
+                                        background: activeReplyMode === 'reaction' ? 'var(--primary)' : 'rgba(255, 255, 255, 0.1)',
+                                        border: 'none',
+                                        color: '#FFF',
+                                        width: '44px',
+                                        height: '44px',
+                                        borderRadius: '50%',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        cursor: 'pointer',
+                                        border: '1px solid rgba(255,255,255,0.08)',
+                                        transition: 'all 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                                    onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                                    title="Quick Reactions"
+                                >
+                                    <Smile size={18} />
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+export default StoryViewer;

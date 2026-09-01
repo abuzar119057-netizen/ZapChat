@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ZapChat</string>
+    <string name="title_activity_main">ZapChat</string>
+    <string name="package_name">com.zapchat.app</string>
+    <string name="custom_url_scheme">com.zapchat.app</string>
+</resources>

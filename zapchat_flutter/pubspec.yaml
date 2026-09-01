@@ -1,0 +1,78 @@
+name: zapchat
+description: ZapChat - Real-time messaging app
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # HTTP & Networking
+  dio: ^5.4.0
+  http: ^1.2.0
+
+  # Socket.IO
+  socket_io_client: ^2.0.3+1
+
+  # State Management
+  provider: ^6.1.2
+
+  # Secure Storage (JWT token)
+  flutter_secure_storage: ^9.0.0
+
+  # Images
+  cached_network_image: ^3.3.1
+
+  # Image & File Picker
+  image_picker: ^1.1.2
+  file_picker: ^8.0.3
+
+  # Permissions
+  permission_handler: ^11.3.1
+
+  # Audio - Voice Messages
+  just_audio: ^0.9.40
+
+  # Emoji Picker
+  emoji_picker_flutter: ^2.2.0
+
+  # Timeago
+  timeago: ^3.6.1
+
+  # URL Launcher
+  url_launcher: ^6.3.0
+
+  # Shared Preferences
+  shared_preferences: ^2.2.3
+
+  # Icons
+  cupertino_icons: ^1.0.8
+  flutter_svg: ^2.0.10+1
+
+  # Intl (date formatting)
+  intl: ^0.19.0
+
+  # SQLite Database
+  sqflite: ^2.4.2+1
+  path: ^1.9.0
+
+  # HTTP multipart for file upload
+  http_parser: ^4.0.2
+
+  # Mesh Network (P2P offline connections)
+  nearby_connections: ^4.3.0
+  uuid: ^4.3.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/icons/
