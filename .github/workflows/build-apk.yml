@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-flutter-apk:
-    name: Build Flutter APK
+    name: Build Flutter Release APK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,11 +33,11 @@ jobs:
       - name: Upload Flutter APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZapChat-Flutter-APK
+          name: ZapChat-Flutter-Release-APK
           path: zapchat_flutter/build/app/outputs/flutter-apk/app-release.apk
 
   build-web-capacitor-apk:
-    name: Build Web-Capacitor APK
+    name: Build Web-Capacitor Release APK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +53,7 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: Build Web App & Capacitor Android APK
+      - name: Build Web App & Capacitor Release APK
         run: |
           cd frontend
           npm install
@@ -61,10 +61,10 @@ jobs:
           npx cap sync android
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleRelease
 
       - name: Upload Capacitor Web APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZapChat-Web-Capacitor-APK
-          path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
+          name: ZapChat-Web-Capacitor-Release-APK
+          path: frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
