@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build All Apps (Flutter & Web APK)
 
 on:
   push:
@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-flutter-apk:
+    name: Build Flutter APK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,18 +24,47 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Get Dependencies
+      - name: Build Flutter Release APK
         run: |
           cd zapchat_flutter
-          flutter pub get --suppress-analytics
+          flutter pub get
+          flutter build apk --release --no-tree-shake-icons
 
-      - name: Build Release APK
-        run: |
-          cd zapchat_flutter
-          flutter build apk --release --no-tree-shake-icons --build-number=1
-
-      - name: Upload APK Artifact
+      - name: Upload Flutter APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZapChat-Release-APK
+          name: ZapChat-Flutter-APK
           path: zapchat_flutter/build/app/outputs/flutter-apk/app-release.apk
+
+  build-web-capacitor-apk:
+    name: Build Web-Capacitor APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Build Web App & Capacitor Android APK
+        run: |
+          cd frontend
+          npm install
+          npm run build
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload Capacitor Web APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZapChat-Web-Capacitor-APK
+          path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
