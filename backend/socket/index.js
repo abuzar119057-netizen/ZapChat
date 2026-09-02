@@ -80,12 +80,20 @@ const setupSocket = (io) => {
         
         connectedUsers.get(userId).add(socket.id);
 
-        // Send list of all currently online users to the newly connected user
+        // Send list of all currently online users to the newly connected user (with lastSeen)
         const onlineUserIds = Array.from(connectedUsers.keys());
-        socket.emit('initial_online_users', onlineUserIds.map(id => ({
-            userId: id,
-            status: 'online'
-        })));
+        try {
+            const onlineUserDocs = await User.find({ _id: { $in: onlineUserIds } }).select('_id lastSeen');
+            const lastSeenMap = {};
+            onlineUserDocs.forEach(u => { lastSeenMap[u._id.toString()] = u.lastSeen; });
+            socket.emit('initial_online_users', onlineUserIds.map(id => ({
+                userId: id,
+                status: 'online',
+                lastSeen: lastSeenMap[id] || null
+            })));
+        } catch(e) {
+            socket.emit('initial_online_users', onlineUserIds.map(id => ({ userId: id, status: 'online' })));
+        }
 
         // Delivery Sync: Update all pending 'sent' messages for this user to 'delivered'
         try {
@@ -713,14 +721,15 @@ socket.on('disconnect', async () => {
                     // Last instance disconnected
                     connectedUsers.delete(userId);
                     
-                    // Update user status
+                    // Update user status and lastSeen
+                    const disconnectTime = new Date();
                     try {
-                        await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: Date.now() });
+                        await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: disconnectTime });
                     } catch (error) {
                         console.error('Error updating user status to offline on disconnect:', error);
                     }
                     
-                    io.emit('user_status', { userId, status: 'offline', lastSeen: Date.now() });
+                    io.emit('user_status', { userId, status: 'offline', lastSeen: disconnectTime.toISOString() });
                 }
             }
         });

@@ -1520,22 +1520,38 @@ const ChatArea = ({ contact, onBack, onHeaderClick, onSelectContact }) => {
     const getOfflineStatusText = () => {
         const targetId = contact.userId || contact._id;
         const socketStatus = onlineUsers[targetId];
-        const ls = socketStatus?.lastSeen || contact.lastSeen;
-        if (!ls) return 'offline';
+        
+        // Try multiple sources for lastSeen: socket live data > contact.contact.lastSeen > contact.lastSeen
+        const ls = socketStatus?.lastSeen 
+            || contact?.contact?.lastSeen 
+            || contact?.lastSeen;
+        
+        if (!ls) return 'last seen: recently';
         
         const date = new Date(ls);
+        if (isNaN(date.getTime())) return 'last seen: recently';
+        
+        const now = new Date();
+        const diffMs = now - date;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMins / 60);
+        
+        // Just now (under 2 mins)
+        if (diffMins < 2) return 'last seen: just now';
+        // Within last hour
+        if (diffMins < 60) return `last seen: ${diffMins} min ago`;
+        
+        const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const today = new Date();
         const yesterday = new Date(today);
         yesterday.setDate(yesterday.getDate() - 1);
-        
-        const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         
         if (date.toDateString() === today.toDateString()) {
             return `last seen today at ${timeStr}`;
         } else if (date.toDateString() === yesterday.toDateString()) {
             return `last seen yesterday at ${timeStr}`;
         }
-        return `last seen on ${date.toLocaleDateString()} at ${timeStr}`;
+        return `last seen ${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} at ${timeStr}`;
     };
 
     if (!contact) {
