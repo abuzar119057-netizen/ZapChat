@@ -27,7 +27,7 @@ const setupSocket = (io) => {
             return next(new Error('Authentication error'));
         }
         try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_secret_key');
             const user = await User.findById(decoded.id).select('displayName profilePicture role isSuspended');
             if (!user) {
                 return next(new Error('Authentication error: User not found'));

@@ -14,7 +14,7 @@ const { protect } = require('../middleware/auth');
 const router = express.Router();
 
 const generateToken = (id, email) => {
-  return jwt.sign({ id: id.toString(), email }, process.env.JWT_SECRET, {
+  return jwt.sign({ id: id.toString(), email }, process.env.JWT_SECRET || 'your_secret_key', {
     expiresIn: '30d',
   });
 };
