@@ -38,9 +38,9 @@ app.get(['/', '/health'], (req, res) => {
 // App Version Endpoint for Instant In-App Auto-Updates (OTA)
 app.get('/api/version', (req, res) => {
   res.status(200).json({
-    version: '1.0.3',
-    buildNumber: 4,
-    releaseNotes: '🕐 Fixed Last Seen: Now shows accurate time like "last seen today at 3:45 PM" instead of "offline"',
+    version: '2.0.0',
+    buildNumber: 5,
+    releaseNotes: '🔒 WhatsApp-style private contact list • 🕐 Last seen time fixed • ⚡ Auto-update system improved',
     forceUpdate: false,
     updatedAt: new Date().toISOString()
   });
