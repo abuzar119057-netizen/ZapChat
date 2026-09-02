@@ -4,6 +4,14 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection:', reason);
+});
+
 const { connectDB } = require('./config/db');
 const setupSocket = require('./socket');
 const authRoutes = require('./routes/auth');

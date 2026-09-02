@@ -17,8 +17,8 @@ const connectDB = async () => {
     });
 
   } catch (error) {
-    console.error(`Error: ${error.message}`);
-    process.exit(1);
+    console.error(`MongoDB Connection Error: ${error.message}`);
+    // Do not call process.exit(1) so server stays alive and retries
   }
 };
 
