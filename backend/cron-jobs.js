@@ -1,8 +1,30 @@
 const cron = require('node-cron');
+const https = require('https');
+const http = require('http');
 const ScheduledMessage = require('./models/ScheduledMessage');
 const Message = require('./models/Message');
 
 const setupCronJobs = (io) => {
+    // 1. 24/7 Self-Ping Keep-Alive Heartbeat (Runs every 4 minutes)
+    // Prevents Back4App free container from sleeping or destroying domain due to inactivity
+    cron.schedule('*/4 * * * *', () => {
+        const liveUrl = process.env.LIVE_BACKEND_URL || 'https://zapchat-8svilt1a.b4a.run';
+        try {
+            if (liveUrl.startsWith('https')) {
+                https.get(`${liveUrl}/health`, (res) => {
+                    console.log(`[Keep-Alive] 24/7 Heartbeat pinged ${liveUrl}/health - Status: ${res.statusCode}`);
+                }).on('error', (err) => {
+                    console.warn(`[Keep-Alive] Ping warning: ${err.message}`);
+                });
+            } else {
+                http.get(`${liveUrl}/health`, (res) => {
+                    console.log(`[Keep-Alive] Heartbeat pinged local - Status: ${res.statusCode}`);
+                }).on('error', () => {});
+            }
+        } catch (e) {
+            console.warn('[Keep-Alive] Heartbeat exception:', e);
+        }
+    });
     // Run every minute
     cron.schedule('* * * * *', async () => {
         try {
