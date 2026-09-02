@@ -53,7 +53,7 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: Build Web App & Capacitor Release APK
+      - name: Build Web App & Capacitor APK
         env:
           VITE_BACKEND_URL: https://zapchatbackend-e0u7wph3.b4a.run
         run: |
@@ -63,10 +63,12 @@ jobs:
           npx cap sync android
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew assembleDebug assembleRelease
 
       - name: Upload Capacitor Web APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZapChat-Web-Capacitor-Release-APK
-          path: frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          name: ZapChat-Web-Capacitor-Signed-APK
+          path: |
+            frontend/android/app/build/outputs/apk/debug/app-debug.apk
+            frontend/android/app/build/outputs/apk/release/*.apk
