@@ -38,9 +38,9 @@ app.get(['/', '/health'], (req, res) => {
 // App Version Endpoint for Instant In-App Auto-Updates (OTA)
 app.get('/api/version', (req, res) => {
   res.status(200).json({
-    version: '1.0.1',
-    buildNumber: 2,
-    releaseNotes: '⚡ Live server performance improvements, brand logo update, and instant live sync!',
+    version: '1.0.2',
+    buildNumber: 3,
+    releaseNotes: '🔒 WhatsApp style isolated contact list & Admin privacy (Admins and global directory hidden from regular users)',
     forceUpdate: false,
     updatedAt: new Date().toISOString()
   });
