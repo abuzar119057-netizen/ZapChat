@@ -1,5 +1,12 @@
 {
   "appId": "com.zapchat.app",
   "appName": "ZapChat",
-  "webDir": "dist"
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
 }
