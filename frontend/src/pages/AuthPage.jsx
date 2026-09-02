@@ -44,44 +44,19 @@ const AuthPage = () => {
             fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif'
         }}>
             <div>
-                {/* Dynamic Illustration */}
+                {/* Brand Logo Illustration */}
                 <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '2vh' }}>
-                    {isLogin ? (
-                        <div style={{ 
-                            width: '90px', height: '90px', borderRadius: '50%', 
-                            background: '#F0F5FF', display: 'flex', alignItems: 'center', 
-                            justifyContent: 'center', position: 'relative' 
-                        }}>
-                                {/* Blue Chat Bubble */}
-                                <div style={{ 
-                                    background: '#007AFF', padding: '12px', borderRadius: '16px', 
-                                    boxShadow: '0 8px 16px rgba(0,122,255,0.25)', zIndex: 2
-                                }}>
-                                    <MessageCircle size={28} color="white" fill="white" />
-                                </div>
-                                {/* Secondary bubbles */}
-                                <div style={{ position: 'absolute', top: '5px', right: '10px', background: '#FFF', padding: '8px', borderRadius: '50%', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
-                                    <MessageCircle size={14} color="#007AFF" /> 
-                                </div>
-                                <div style={{ position: 'absolute', bottom: '5px', left: '10px', background: '#FFF', padding: '6px', borderRadius: '50%', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
-                                    <CheckCircle size={11} color="#007AFF" fill="#007AFF" /> 
-                                </div>
-                            </div>
-                        ) : (
-                            <div style={{ 
-                                width: '90px', height: '90px', borderRadius: '50%', 
-                                background: '#F0F5FF', display: 'flex', alignItems: 'center', 
-                                justifyContent: 'center' 
-                            }}>
-                                <div style={{ 
-                                    background: '#007AFF', padding: '18px', borderRadius: '18px', 
-                                    boxShadow: '0 8px 16px rgba(0,122,255,0.25)' 
-                                }}>
-                                    <UserPlus size={32} color="white" />
-                                </div>
-                            </div>
-                        )}
-                    </div>
+                    <img 
+                      src="/logo.png" 
+                      alt="ZapChat Logo" 
+                      style={{ 
+                        width: '80px', 
+                        height: '80px', 
+                        objectFit: 'contain',
+                        filter: 'drop-shadow(0 6px 12px rgba(0,122,255,0.25))'
+                      }} 
+                    />
+                </div>
 
                     {/* Typography Header */}
                     <div style={{ textAlign: 'center', marginBottom: '2.5vh' }}>
