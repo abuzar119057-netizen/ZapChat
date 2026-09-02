@@ -54,6 +54,8 @@ jobs:
           java-version: '21'
 
       - name: Build Web App & Capacitor Release APK
+        env:
+          VITE_BACKEND_URL: https://zapchat-backend-11cc400f.b4a.run
         run: |
           cd frontend
           npm install
