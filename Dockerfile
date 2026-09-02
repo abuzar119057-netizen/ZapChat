@@ -1,7 +1,7 @@
 FROM node:20-alpine
 WORKDIR /app
-COPY backend/package*.json ./
-RUN npm install
-COPY backend/ ./
+COPY package*.json ./
+RUN npm install --omit=dev
+COPY . .
 EXPOSE 5000
-CMD ["node", "--max-old-space-size=192", "server.js"]
+CMD ["node", "--max-old-space-size=192", "backend/server.js"]
