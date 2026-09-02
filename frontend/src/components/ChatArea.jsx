@@ -1526,32 +1526,52 @@ const ChatArea = ({ contact, onBack, onHeaderClick, onSelectContact }) => {
             || contact?.contact?.lastSeen 
             || contact?.lastSeen;
         
-        if (!ls) return 'last seen: recently';
+        if (!ls) return 'offline';
         
         const date = new Date(ls);
-        if (isNaN(date.getTime())) return 'last seen: recently';
+        if (isNaN(date.getTime())) return 'offline';
         
         const now = new Date();
-        const diffMs = now - date;
-        const diffMins = Math.floor(diffMs / 60000);
+        const diffMs = now.getTime() - date.getTime();
+        if (diffMs < 0) return 'last seen: just now';
+
+        const diffSecs = Math.floor(diffMs / 1000);
+        const diffMins = Math.floor(diffSecs / 60);
         const diffHours = Math.floor(diffMins / 60);
-        
-        // Just now (under 2 mins)
+        const diffDays = Math.floor(diffHours / 24);
+        const diffMonths = Math.floor(diffDays / 30);
+        const diffYears = Math.floor(diffDays / 365);
+
+        // 1. Under 2 minutes
         if (diffMins < 2) return 'last seen: just now';
-        // Within last hour
-        if (diffMins < 60) return `last seen: ${diffMins} min ago`;
         
+        // 2. Under 1 hour
+        if (diffMins < 60) return `last seen: ${diffMins} min ago`;
+
         const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const today = new Date();
         const yesterday = new Date(today);
         yesterday.setDate(yesterday.getDate() - 1);
         
+        // 3. Today / Yesterday
         if (date.toDateString() === today.toDateString()) {
             return `last seen today at ${timeStr}`;
         } else if (date.toDateString() === yesterday.toDateString()) {
             return `last seen yesterday at ${timeStr}`;
         }
-        return `last seen ${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} at ${timeStr}`;
+
+        // 4. Days ago (up to 30 days)
+        if (diffDays < 30) {
+            return `last seen ${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+        }
+
+        // 5. Months ago (between 30 days and 365 days)
+        if (diffMonths < 12) {
+            return `last seen ${diffMonths} month${diffMonths > 1 ? 's' : ''} ago`;
+        }
+
+        // 6. Years ago
+        return `last seen ${diffYears} year${diffYears > 1 ? 's' : ''} ago`;
     };
 
     if (!contact) {
