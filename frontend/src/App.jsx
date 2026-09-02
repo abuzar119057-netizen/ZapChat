@@ -9,6 +9,7 @@ import AdminDashboard from './pages/AdminDashboard';
 import SplashPage from './pages/SplashPage';
 import JoinGroup from './pages/JoinGroup';
 import CallOverlay from './components/CallOverlay';
+import AutoUpdateModal from './components/AutoUpdateModal';
 
 import { syncService } from './services/syncService';
 import { nearbyService } from './services/nearbyService';
@@ -44,6 +45,7 @@ function App() {
   return (
     <>
       <CallOverlay />
+      <AutoUpdateModal />
       <Routes>
          <Route path="/" element={<SplashPage />} />
         <Route path="/auth" element={!user ? <AuthPage /> : <Navigate to="/chat" />} />

@@ -35,6 +35,17 @@ app.get(['/', '/health'], (req, res) => {
   res.status(200).json({ status: 'ok', message: 'ZapChat Backend API is running live' });
 });
 
+// App Version Endpoint for Instant In-App Auto-Updates (OTA)
+app.get('/api/version', (req, res) => {
+  res.status(200).json({
+    version: '1.0.1',
+    buildNumber: 2,
+    releaseNotes: '⚡ Live server performance improvements, brand logo update, and instant live sync!',
+    forceUpdate: false,
+    updatedAt: new Date().toISOString()
+  });
+});
+
 
 // Middleware - Allow all origins for mobile app compatibility
 app.use(cors({
