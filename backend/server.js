@@ -55,8 +55,6 @@ app.use('/uploads', express.static('uploads'));
 // Main DB and GridFS Connections
 const startServer = async () => {
   try {
-    await connectDB();
-
     // Create HTTP server mapped with Express app
     const server = http.createServer(app);
 
@@ -94,18 +92,19 @@ const startServer = async () => {
     app.use('/api/fcm', fcmRoutes);
     app.use('/api/avatar', avatarRoutes);
 
-
-    // Server listen
+    // Server listen IMMEDIATELY for cloud health check speed
     const PORT = process.env.PORT || 5000;
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`Server running on port ${PORT}`);
     });
+
+    // Connect DB asynchronously so server port binds instantly
+    connectDB().catch(err => {
+      console.error('MongoDB async connection error:', err);
+    });
+
   } catch (error) {
     console.error('Failed to start server:', error);
-    const PORT = process.env.PORT || 5000;
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`Fallback server running on port ${PORT}`);
-    });
   }
 };
 
