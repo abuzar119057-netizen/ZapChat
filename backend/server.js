@@ -46,51 +46,6 @@ app.get('/api/version', (req, res) => {
   });
 });
 
-// Database Cleanup Endpoint: Deletes all non-admin test users, keeping only Admin/Kamboh
-app.get('/api/clean-test-users', async (req, res) => {
-  try {
-    const User = require('./models/User');
-    const Contact = require('./models/Contact');
-    const Message = require('./models/Message');
-
-    const adminUsers = await User.find({
-      $or: [
-        { role: 'admin' },
-        { displayName: { $regex: 'kamboh', $options: 'i' } },
-        { email: 'kamboh@gmail.com' }
-      ]
-    });
-
-    const adminIds = adminUsers.map(u => u._id.toString());
-
-    const deleteResult = await User.deleteMany({
-      _id: { $nin: adminIds }
-    });
-
-    await Contact.deleteMany({
-      $or: [
-        { user: { $nin: adminIds } },
-        { contact: { $nin: adminIds } }
-      ]
-    });
-
-    await Message.deleteMany({
-      $or: [
-        { sender: { $nin: adminIds } },
-        { recipient: { $nin: adminIds } }
-      ]
-    });
-
-    res.json({
-      message: '✅ Database cleaned successfully! All non-admin test users and messages removed.',
-      deletedUsersCount: deleteResult.deletedCount,
-      preservedAdmins: adminUsers.map(u => ({ id: u._id, displayName: u.displayName, email: u.email, role: u.role }))
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 
 // Middleware - Allow all origins for mobile app compatibility
 app.use(cors({
