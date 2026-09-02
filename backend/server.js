@@ -30,8 +30,8 @@ const fcmRoutes = require('./routes/fcm');
 
 const app = express();
 
-// Root route for cloud health checks (Back4App, Render, Vercel)
-app.get('/', (req, res) => {
+// Root route & Health check for cloud platform monitoring (Back4App, Render, etc.)
+app.get(['/', '/health'], (req, res) => {
   res.status(200).json({ status: 'ok', message: 'ZapChat Backend API is running live' });
 });
 

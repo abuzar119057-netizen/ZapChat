@@ -5,4 +5,4 @@ RUN npm ci --omit=dev
 COPY . .
 RUN npx prisma generate || true
 EXPOSE 5000
-CMD ["node", "server.js"]
+CMD ["node", "--max-old-space-size=192", "server.js"]
