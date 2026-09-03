@@ -14,10 +14,9 @@ router.get('/', protect, async (req, res) => {
     const contacts = await Contact.find({ user: req.user.id })
       .populate('contact', 'displayName email profilePicture status lastSeen about phone role');
     
-    // Filter out null contacts and hide admin users from regular user lists
+    // Filter out null contacts only (admin can message users, user can see admin in their chat if admin initiated)
     const validContacts = contacts.filter(c => {
       if (!c.contact) return false;
-      if (req.user.role !== 'admin' && c.contact.role === 'admin') return false;
       return true;
     });
 
@@ -47,9 +46,7 @@ router.get('/', protect, async (req, res) => {
     let chatOnlyContacts = [];
     if (chatOnlyPartnerIds.length > 0) {
       const partnerQuery = { _id: { $in: chatOnlyPartnerIds } };
-      if (req.user.role !== 'admin') {
-        partnerQuery.role = { $ne: 'admin' };
-      }
+      // Allow all partners including admin to appear in chat list (admin message shows on user side)
       
       const partnerUsers = await User.find(partnerQuery)
         .select('displayName email profilePicture status lastSeen about phone role');
@@ -97,7 +94,7 @@ router.get('/active', protect, async (req, res) => {
   }
 });
 
-// @desc    Search users to add as contacts (WhatsApp style: requires query)
+// @desc    Search users to add as contacts
 // @route   GET /api/contacts/search?q=query
 router.get('/search', protect, async (req, res) => {
   try {
@@ -116,10 +113,8 @@ router.get('/search', protect, async (req, res) => {
       ]
     };
 
-    if (req.user.role !== 'admin') {
-      query.role = { $ne: 'admin' };
-    }
-
+    // Regular users CAN search admin (to reply/message them)
+    // Admin can search everyone
     const users = await User.find(query)
       .select('displayName email profilePicture about phone role')
       .limit(30);
