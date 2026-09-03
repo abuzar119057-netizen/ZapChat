@@ -55,7 +55,7 @@ jobs:
 
       - name: Build Web App & Capacitor APK
         env:
-          VITE_BACKEND_URL: https://zapchat1-vbymlxsu.b4a.run
+          VITE_BACKEND_URL: https://zapchat2-r1rsg0hu.b4a.run
         run: |
           cd frontend
           npm install

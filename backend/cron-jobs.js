@@ -8,7 +8,7 @@ const setupCronJobs = (io) => {
     // 1. 24/7 Self-Ping Keep-Alive Heartbeat (Runs every 4 minutes)
     // Prevents Back4App free container from sleeping or destroying domain due to inactivity
     cron.schedule('*/4 * * * *', () => {
-        const liveUrl = process.env.LIVE_BACKEND_URL || 'https://zapchat1-vbymlxsu.b4a.run';
+        const liveUrl = process.env.LIVE_BACKEND_URL || 'https://zapchat2-r1rsg0hu.b4a.run';
         try {
             if (liveUrl.startsWith('https')) {
                 https.get(`${liveUrl}/health`, (res) => {

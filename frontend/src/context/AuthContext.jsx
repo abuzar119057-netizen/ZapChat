@@ -16,7 +16,7 @@ export const AuthProvider = ({ children }) => {
       // Remove trailing slash if present
       return `${backendUrl.replace(/\/$/, '')}/api`;
     }
-    return 'https://zapchat1-vbymlxsu.b4a.run/api'; // Live Back4App backend
+    return 'https://zapchat2-r1rsg0hu.b4a.run/api'; // Live Back4App backend
   };
 
   const api = axios.create({
