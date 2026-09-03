@@ -32,7 +32,10 @@ const AutoUpdateModal = () => {
 
   const checkVersion = async () => {
     try {
-      const backendUrl = import.meta.env.VITE_BACKEND_URL || 'https://zapchat2-r1rsg0hu.b4a.run';
+      const rawUrl = import.meta.env.VITE_BACKEND_URL;
+      const backendUrl = (rawUrl && !rawUrl.includes('zapchat1') && !rawUrl.includes('zapchat-8svilt1a'))
+        ? rawUrl
+        : 'https://zapchat2-r1rsg0hu.b4a.run';
       // Add cache-busting timestamp so browser never returns cached response
       const res = await fetch(`${backendUrl}/api/version?t=${Date.now()}`, {
         cache: 'no-store',

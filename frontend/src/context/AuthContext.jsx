@@ -12,11 +12,10 @@ export const AuthProvider = ({ children }) => {
   // Axios instance with interceptor to add token
   const getBaseURL = () => {
     const backendUrl = import.meta.env.VITE_BACKEND_URL;
-    if (backendUrl) {
-      // Remove trailing slash if present
+    if (backendUrl && !backendUrl.includes('zapchat1') && !backendUrl.includes('zapchat-8svilt1a')) {
       return `${backendUrl.replace(/\/$/, '')}/api`;
     }
-    return 'https://zapchat2-r1rsg0hu.b4a.run/api'; // Live Back4App backend
+    return 'https://zapchat2-r1rsg0hu.b4a.run/api'; // Live active Back4App backend
   };
 
   const api = axios.create({

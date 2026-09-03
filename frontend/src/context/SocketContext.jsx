@@ -13,7 +13,11 @@ export const SocketProvider = ({ children }) => {
 
   useEffect(() => {
     if (user && user.token) {
-      const newSocket = io(`${import.meta.env.VITE_BACKEND_URL || "https://zapchat2-r1rsg0hu.b4a.run"}`, {
+      const rawUrl = import.meta.env.VITE_BACKEND_URL;
+      const targetUrl = (rawUrl && !rawUrl.includes('zapchat1') && !rawUrl.includes('zapchat-8svilt1a'))
+        ? rawUrl
+        : "https://zapchat2-r1rsg0hu.b4a.run";
+      const newSocket = io(targetUrl, {
         auth: { token: user.token },
         transports: ['websocket', 'polling'],
         withCredentials: true,
