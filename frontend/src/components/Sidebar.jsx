@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useCall } from '../context/CallContext';
 import { useSocket } from '../context/SocketContext';
 import StoryViewer from './StoryViewer';
+import AddContactModal from './AddContactModal';
 import {
   Search, Camera, Plus, MessageCircle, Phone, Video, Users, Settings,
   UserPlus, Check, CheckCheck, MapPin, Mic, FileText, User as UserIcon,
@@ -155,6 +156,7 @@ const Sidebar = ({ onSelectContact, selectedContact, initialStoryGroup, onStoryG
   const [contacts, setContacts] = useState([]);
   const [directoryUsers, setDirectoryUsers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showAddContactModal, setShowAddContactModal] = useState(false);
   const [selectedAdminUser, setSelectedAdminUser] = useState(null);
   const [showAdminControlPanel, setShowAdminControlPanel] = useState(false);
   const [isAdminActionLoading, setIsAdminActionLoading] = useState(false);
@@ -4719,13 +4721,18 @@ const groupIconInputRef = useRef(null);
                   <span style={{ fontSize: '16px', fontWeight: '600', color: '#000' }}>New Group</span>
                 </div>
                 <div
-                  onClick={() => { setSelectContactOpen(false); setActiveTab('contacts'); }}
-                  style={{ display: 'flex', alignItems: 'center', gap: '14px', padding: '14px 16px', background: '#fff', borderBottom: '0.5px solid #E5E5EA', cursor: 'pointer' }}
+                  onClick={() => { setSelectContactOpen(false); setShowAddContactModal(true); }}
+                  style={{ display: 'flex', alignItems: 'center', gap: '14px', padding: '14px 16px', background: '#fff', borderBottom: '0.5px solid #E5E5EA', cursor: 'pointer', transition: 'background 0.15s' }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#F2F2F7'}
+                  onMouseLeave={e => e.currentTarget.style.background = '#fff'}
                 >
-                  <div style={{ width: '44px', height: '44px', borderRadius: '50%', background: '#007AFF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <div style={{ width: '44px', height: '44px', borderRadius: '50%', background: 'linear-gradient(135deg, #007AFF, #34C759)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 12px rgba(0,122,255,0.3)' }}>
                     <UserPlus size={20} color="#fff" />
                   </div>
-                  <span style={{ fontSize: '16px', fontWeight: '500', color: '#000' }}>New contact</span>
+                  <div>
+                    <span style={{ fontSize: '16px', fontWeight: '600', color: '#000', display: 'block' }}>New contact</span>
+                    <span style={{ fontSize: '12px', color: '#8E8E93' }}>Search by phone, email or name</span>
+                  </div>
                 </div>
               </>
             )}
@@ -5810,6 +5817,19 @@ const groupIconInputRef = useRef(null);
           </div>
         </div>
       ), document.body)}
+
+      {/* Add Contact Modal — WhatsApp style phone/email/name search */}
+      <AddContactModal
+        isOpen={showAddContactModal}
+        onClose={() => setShowAddContactModal(false)}
+        onSelectContact={(u) => {
+          onSelectContact(u);
+          setShowAddContactModal(false);
+        }}
+        onContactAdded={() => {
+          if (typeof fetchContacts === 'function') fetchContacts();
+        }}
+      />
     </div>
   );
 };
