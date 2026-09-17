@@ -233,18 +233,162 @@ export async function removePeer(peerId) {
   await db.delete('peers', peerId);
 }
 
+// ── PBKDF2 Web Crypto Helpers ────────────────────────────────────────────────
+
+async function hashPasswordPBKDF2(password, saltHex = null) {
+  const enc = new TextEncoder();
+  const salt = saltHex 
+    ? new Uint8Array(saltHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)))
+    : window.crypto.getRandomValues(new Uint8Array(16));
+
+  const keyMaterial = await window.crypto.subtle.importKey(
+    'raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveBits', 'deriveKey']
+  );
+
+  const derivedKey = await window.crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt,
+      iterations: 100000,
+      hash: 'SHA-256'
+    },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+
+  const exported = await window.crypto.subtle.exportKey('raw', derivedKey);
+  const hashHex = Array.from(new Uint8Array(exported)).map(b => b.toString(16).padStart(2, '0')).join('');
+  const saltStr = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('');
+
+  return { hashHex, saltHex: saltStr };
+}
+
+// ── Offline User Accounts CRUD ───────────────────────────────────────────────
+
+export async function createLocalUser({ displayName, username, password }) {
+  const db = await getDB();
+  const cleanUsername = username.trim().toLowerCase();
+
+  // Check username uniqueness on local device
+  const allUsers = await db.getAll('users');
+  const existing = allUsers.find(u => u.username === cleanUsername);
+  if (existing) {
+    throw new Error('Username already exists on this device. Please choose another.');
+  }
+
+  const { hashHex, saltHex } = await hashPasswordPBKDF2(password);
+  const localAccountId = `acc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+  const userRecord = {
+    userId: localAccountId,
+    localAccountId,
+    displayName,
+    username: cleanUsername,
+    passwordHash: hashHex,
+    saltHex,
+    accountType: 'LOCAL_OFFLINE',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  await db.put('users', userRecord);
+  const user = {
+    _id: localAccountId,
+    localAccountId,
+    displayName,
+    username: cleanUsername,
+    accountType: 'LOCAL_OFFLINE',
+    isOffline: true
+  };
+  await saveActiveOfflineSession(user);
+  return user;
+}
+
+export async function verifyLocalPassword(username, password) {
+  const db = await getDB();
+  const cleanUsername = username.trim().toLowerCase();
+  const allUsers = await db.getAll('users');
+  const user = allUsers.find(u => u.username === cleanUsername);
+
+  if (!user) {
+    throw new Error('Invalid username or password.');
+  }
+
+  // Brute-force lockout check
+  if (user.lockoutUntil && Date.now() < user.lockoutUntil) {
+    const remainingSecs = Math.ceil((user.lockoutUntil - Date.now()) / 1000);
+    throw new Error(`Account locked due to repeated failed login attempts. Try again in ${remainingSecs} seconds.`);
+  }
+
+  const { hashHex } = await hashPasswordPBKDF2(password, user.saltHex);
+  if (hashHex !== user.passwordHash) {
+    const failedAttempts = (user.failedAttempts || 0) + 1;
+    let lockoutUntil = user.lockoutUntil || null;
+    let errMsg = `Invalid username or password. (${failedAttempts}/5 attempts)`;
+
+    if (failedAttempts >= 5) {
+      lockoutUntil = Date.now() + 60000; // 60-second lockout
+      errMsg = 'Too many failed login attempts. Account locked for 60 seconds.';
+    }
+
+    user.failedAttempts = failedAttempts >= 5 ? 0 : failedAttempts;
+    user.lockoutUntil = lockoutUntil;
+    user.updatedAt = new Date().toISOString();
+    await db.put('users', user);
+
+    throw new Error(errMsg);
+  }
+
+  // Reset failed attempts on successful login
+  user.failedAttempts = 0;
+  user.lockoutUntil = null;
+  user.updatedAt = new Date().toISOString();
+  await db.put('users', user);
+
+  const activeUser = {
+    _id: user.localAccountId,
+    localAccountId: user.localAccountId,
+    displayName: user.displayName,
+    username: user.username,
+    accountType: user.accountType || 'LOCAL_OFFLINE',
+    isOffline: true
+  };
+  await saveActiveOfflineSession(activeUser);
+  return activeUser;
+}
+
+export async function saveActiveOfflineSession(user) {
+  localStorage.setItem('zapchat_active_offline_user', JSON.stringify(user));
+}
+
+export async function getActiveOfflineSession() {
+  const stored = localStorage.getItem('zapchat_active_offline_user');
+  if (stored) {
+    try { return JSON.parse(stored); } catch (e) { return null; }
+  }
+  return null;
+}
+
+export async function clearActiveOfflineSession() {
+  localStorage.removeItem('zapchat_active_offline_user');
+}
+
 export async function getLocalDBStats() {
   const db = await getDB();
   const msgCount = await db.count('messages');
   const chatCount = await db.count('chats');
   const fileCount = await db.count('files');
   const queueCount = await db.count('sync_queue');
+  const userCount = await db.count('users');
   
   return {
     dbVersion: DB_VERSION,
     msgCount,
     chatCount,
     fileCount,
-    queueCount
+    queueCount,
+    userCount
   };
 }

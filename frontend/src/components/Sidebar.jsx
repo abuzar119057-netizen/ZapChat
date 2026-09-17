@@ -3043,9 +3043,14 @@ const groupIconInputRef = useRef(null);
                     alt=""
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: '700', fontSize: '18px', color: '#000000' }}>{user?.displayName || 'User'}</div>
+                    <div style={{ fontWeight: '700', fontSize: '18px', color: '#000000', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span>{user?.displayName || 'User'}</span>
+                      <span style={{ fontSize: '11px', background: user?.isOffline ? '#34C75920' : '#007AFF20', color: user?.isOffline ? '#28A745' : '#007AFF', padding: '2px 8px', borderRadius: '10px', fontWeight: '700' }}>
+                        {user?.isOffline ? 'OFFLINE MESH' : 'ONLINE CLOUD'}
+                      </span>
+                    </div>
                     <div style={{ fontSize: '14px', color: '#8E8E93', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: '2px' }}>
-                      {user?.about || 'Hey there! I am using Zap Chat.'}
+                      {user?.isOffline ? `@${user?.username || 'local_user'}` : (user?.about || 'Hey there! I am using Zap Chat.')}
                     </div>
                   </div>
                   <ChevronRight size={20} color="#C7C7CC" />
