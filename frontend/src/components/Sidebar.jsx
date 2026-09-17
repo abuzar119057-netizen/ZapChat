@@ -5,6 +5,8 @@ import { useCall } from '../context/CallContext';
 import { useSocket } from '../context/SocketContext';
 import StoryViewer from './StoryViewer';
 import AddContactModal from './AddContactModal';
+import WifiDirectModal from './WifiDirectModal';
+import { Wifi as WifiIcon, Zap as ZapIcon } from 'lucide-react';
 import {
   Search, Camera, Plus, MessageCircle, Phone, Video, Users, Settings,
   UserPlus, Check, CheckCheck, MapPin, Mic, FileText, User as UserIcon,
@@ -157,6 +159,7 @@ const Sidebar = ({ onSelectContact, selectedContact, initialStoryGroup, onStoryG
   const [directoryUsers, setDirectoryUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddContactModal, setShowAddContactModal] = useState(false);
+  const [showWifiDirectModal, setShowWifiDirectModal] = useState(false);
   const [selectedAdminUser, setSelectedAdminUser] = useState(null);
   const [showAdminControlPanel, setShowAdminControlPanel] = useState(false);
   const [isAdminActionLoading, setIsAdminActionLoading] = useState(false);
@@ -1279,6 +1282,14 @@ const groupIconInputRef = useRef(null);
         <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '16px' }}>
             {activeTab === 'chats' && (
               <>
+                <WifiIcon 
+                  size={22} 
+                  color="#00e676" 
+                  strokeWidth={2} 
+                  style={{ cursor: 'pointer' }} 
+                  title="Offline Wi-Fi Direct Chat (No Internet)" 
+                  onClick={() => setShowWifiDirectModal(true)} 
+                />
                 <Camera size={24} color="#007AFF" strokeWidth={1.5} style={{ cursor: 'pointer' }} onClick={() => openCamera('user')} />
                 <div style={{ cursor: 'pointer', background: '#007AFF', borderRadius: '50%', width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 5px rgba(0,122,255,0.3)' }} onClick={() => { setSelectContactSearch(''); setSelectContactOpen(true); }}>
                   <Plus size={20} color="#FFFFFF" strokeWidth={2.5} />
@@ -5829,6 +5840,12 @@ const groupIconInputRef = useRef(null);
         onContactAdded={() => {
           if (typeof fetchContacts === 'function') fetchContacts();
         }}
+      />
+
+      {/* Offline Wi-Fi Direct P2P Chat Modal */}
+      <WifiDirectModal
+        isOpen={showWifiDirectModal}
+        onClose={() => setShowWifiDirectModal(false)}
       />
     </div>
   );
