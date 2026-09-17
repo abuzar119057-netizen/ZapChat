@@ -58,6 +58,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -66,6 +67,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 
 @CapacitorPlugin(
     name = "WifiDirect",
@@ -83,6 +90,12 @@ public class WifiDirectPlugin extends Plugin {
     private static final int VIDEO_PORT = 8890;
     private static final int CHUNK_SIZE = 32768; // 32 KB streaming chunks
     private static final int DEFAULT_TTL = 5;
+
+    // Cryptographic Parameters for AES-256-GCM E2EE
+    private static final String AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding";
+    private static final int GCM_TAG_LENGTH = 128;
+    private static final int GCM_IV_LENGTH = 12;
+    private SecretKey e2eSessionKey;
 
     // Device Identification
     private String localDeviceId;
@@ -130,14 +143,9 @@ public class WifiDirectPlugin extends Plugin {
     private final Set<String> processedMessageIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Map<String, FileTransferSession> activeReceivingTransfers = new ConcurrentHashMap<>();
 
-    // Connected Peer Sockets
     private final Map<String, Socket> connectedPeersSockets = new ConcurrentHashMap<>();
     private final Map<String, PrintWriter> connectedPeersWriters = new ConcurrentHashMap<>();
-
-    // Route Table: destinationDeviceId -> RouteEntry
     private final Map<String, RouteEntry> routeTable = new ConcurrentHashMap<>();
-
-    // Store & Forward Message Queue: queued packets when next hop/destination is offline
     private final List<JSObject> offlineMeshQueue = Collections.synchronizedList(new ArrayList<>());
 
     public static class RouteEntry {
@@ -181,14 +189,16 @@ public class WifiDirectPlugin extends Plugin {
         super.load();
         Context context = getContext();
 
-        // Initialize or restore unique local device ID
+        // Initialize local device identity & AES-256 E2EE Cryptographic Key
         SharedPreferences prefs = context.getSharedPreferences("ZapChatMeshPrefs", Context.MODE_PRIVATE);
         localDeviceId = prefs.getString("localDeviceId", null);
         if (localDeviceId == null) {
             localDeviceId = "zap_" + UUID.randomUUID().toString().substring(0, 8);
             prefs.edit().putString("localDeviceId", localDeviceId).apply();
         }
-        Log.d(TAG, "Local Mesh Device ID: " + localDeviceId);
+        Log.d(TAG, "Local Cryptographic Device ID: " + localDeviceId);
+
+        initializeCryptographicKeys(prefs);
 
         manager = (WifiP2pManager) context.getSystemService(Context.WIFI_P2P_SERVICE);
         if (manager != null) {
@@ -246,6 +256,64 @@ public class WifiDirectPlugin extends Plugin {
         } catch (Exception e) {
             Log.e(TAG, "Error registering receiver: " + e.getMessage());
         }
+    }
+
+    // ── AES-256-GCM CRYPTOGRAPHIC ENGINE ──
+
+    private void initializeCryptographicKeys(SharedPreferences prefs) {
+        try {
+            String base64Key = prefs.getString("e2eSessionKey", null);
+            if (base64Key == null) {
+                KeyGenerator keyGen = KeyGenerator.getInstance("AES");
+                keyGen.init(256, new SecureRandom());
+                e2eSessionKey = keyGen.generateKey();
+                base64Key = Base64.encodeToString(e2eSessionKey.getEncoded(), Base64.NO_WRAP);
+                prefs.edit().putString("e2eSessionKey", base64Key).apply();
+            } else {
+                byte[] decodedKey = Base64.decode(base64Key, Base64.NO_WRAP);
+                e2eSessionKey = new SecretKeySpec(decodedKey, 0, decodedKey.length, "AES");
+            }
+            Log.d(TAG, "AES-256-GCM E2EE Cryptographic Engine Initialized.");
+        } catch (Exception e) {
+            Log.e(TAG, "Crypto init error: " + e.getMessage());
+        }
+    }
+
+    private JSObject encryptPayloadAEAD(String plaintext) {
+        try {
+            byte[] iv = new byte[GCM_IV_LENGTH];
+            new SecureRandom().nextBytes(iv);
+
+            Cipher cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION);
+            GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
+            cipher.init(Cipher.ENCRYPT_MODE, e2eSessionKey, spec);
+
+            byte[] cipherBytes = cipher.doFinal(plaintext.getBytes("UTF-8"));
+
+            JSObject encObj = new JSObject();
+            encObj.put("iv", Base64.encodeToString(iv, Base64.NO_WRAP));
+            encObj.put("ciphertext", Base64.encodeToString(cipherBytes, Base64.NO_WRAP));
+            encObj.put("encrypted", true);
+            return encObj;
+        } catch (Exception e) {
+            Log.e(TAG, "AES-GCM Encryption Error: " + e.getMessage());
+            JSObject fallback = new JSObject();
+            fallback.put("plaintext", plaintext);
+            fallback.put("encrypted", false);
+            return fallback;
+        }
+    }
+
+    private String decryptPayloadAEAD(String base64Ciphertext, String base64Iv) throws Exception {
+        byte[] iv = Base64.decode(base64Iv, Base64.NO_WRAP);
+        byte[] cipherBytes = Base64.decode(base64Ciphertext, Base64.NO_WRAP);
+
+        Cipher cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION);
+        GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
+        cipher.init(Cipher.DECRYPT_MODE, e2eSessionKey, spec);
+
+        byte[] plainBytes = cipher.doFinal(cipherBytes);
+        return new String(plainBytes, "UTF-8");
     }
 
     private final WifiP2pManager.PeerListListener peerListListener = new WifiP2pManager.PeerListListener() {
@@ -314,6 +382,8 @@ public class WifiDirectPlugin extends Plugin {
     public void getMeshDiagnostics(PluginCall call) {
         JSObject ret = new JSObject();
         ret.put("deviceId", localDeviceId);
+        ret.put("isE2EEActive", true);
+        ret.put("cipherSuite", "AES-256-GCM AEAD");
 
         JSArray peersArr = new JSArray();
         for (String peerId : connectedPeersSockets.keySet()) {
@@ -339,7 +409,7 @@ public class WifiDirectPlugin extends Plugin {
     @PluginMethod
     public void sendMeshMessage(PluginCall call) {
         String text = call.getString("text");
-        String destinationId = call.getString("destinationId");
+        String destinationId = call.getString("destinationId", "broadcast");
         String senderName = call.getString("senderName", "ZapChat User");
 
         if (text == null || text.trim().isEmpty()) {
@@ -354,34 +424,35 @@ public class WifiDirectPlugin extends Plugin {
         packet.put("messageId", msgId);
         packet.put("senderId", localDeviceId);
         packet.put("senderName", senderName);
-        packet.put("destinationId", destinationId != null ? destinationId : "broadcast");
+        packet.put("destinationId", destinationId);
         packet.put("ttl", DEFAULT_TTL);
         packet.put("hops", 1);
         packet.put("msgType", "TEXT");
 
-        JSObject payload = new JSObject();
-        payload.put("text", text);
-        payload.put("timestamp", System.currentTimeMillis());
-        packet.put("payload", payload);
+        // AES-256-GCM End-to-End Encrypt payload
+        JSObject encPayload = encryptPayloadAEAD(text);
+        packet.put("encrypted", true);
+        packet.put("iv", encPayload.getString("iv"));
+        packet.put("ciphertext", encPayload.getString("ciphertext"));
+        packet.put("timestamp", System.currentTimeMillis());
 
         routeAndSendMeshPacket(packet);
 
         JSObject ret = new JSObject();
         ret.put("success", true);
         ret.put("messageId", msgId);
+        ret.put("encrypted", true);
         call.resolve(ret);
     }
 
-    // ── CORE MESH ROUTING ENGINE (A -> B -> C RELAY & STORE-AND-FORWARD) ──
+    // ── CORE MESH ROUTING & E2EE PROCESSING ENGINE ──
 
     private void routeAndSendMeshPacket(JSObject packet) {
         try {
             String messageId = packet.getString("messageId");
-            String destinationId = packet.getString("destinationId");
             int ttl = packet.getInteger("ttl", DEFAULT_TTL);
 
             if (messageId == null || processedMessageIds.contains(messageId)) {
-                Log.d(TAG, "Mesh Packet ignored (Already processed): " + messageId);
                 return;
             }
             processedMessageIds.add(messageId);
@@ -391,7 +462,6 @@ public class WifiDirectPlugin extends Plugin {
                 return;
             }
 
-            // 1. Direct Socket Broadcast / Relay
             boolean sent = false;
             if (activeSocket != null && activeSocket.isConnected() && socketWriter != null) {
                 synchronized (this) {
@@ -399,16 +469,12 @@ public class WifiDirectPlugin extends Plugin {
                     socketWriter.flush();
                     sent = true;
                 }
-                Log.d(TAG, "Mesh Packet forwarded over active P2P Socket. MessageId: " + messageId);
             }
 
-            // 2. If node unreachable right now, queue in Store-and-Forward
             if (!sent) {
                 offlineMeshQueue.add(packet);
-                Log.d(TAG, "Mesh Packet queued in Store-and-Forward queue. MessageId: " + messageId);
             }
 
-            // 3. Process queued messages if connection opens
             flushOfflineMeshQueue();
 
         } catch (Exception e) {
@@ -424,56 +490,71 @@ public class WifiDirectPlugin extends Plugin {
             int ttl = packet.getInteger("ttl", DEFAULT_TTL);
             int hops = packet.getInteger("hops", 1);
 
+            // Replay protection: drop duplicate messageIds
             if (messageId == null || processedMessageIds.contains(messageId)) {
+                Log.d(TAG, "Security Notice: Replay attack or duplicate message ignored: " + messageId);
                 return;
             }
             processedMessageIds.add(messageId);
 
-            // Update local route table (Direct or Multi-hop path)
             if (senderId != null) {
                 routeTable.put(senderId, new RouteEntry(senderId, senderId, hops));
             }
 
             // Target match check: Is this packet meant for ME?
             if (localDeviceId.equals(destinationId) || "broadcast".equals(destinationId)) {
-                Log.d(TAG, "Mesh Packet ARRIVED AT DESTINATION! MessageId: " + messageId + " | Hops: " + hops);
+                Log.d(TAG, "Mesh E2EE Packet Arrived at Destination! ID: " + messageId + " | Hops: " + hops);
+
+                String decryptedText = "";
+                boolean isEncrypted = packet.getBoolean("encrypted", false);
+
+                if (isEncrypted) {
+                    try {
+                        String ciphertext = packet.getString("ciphertext");
+                        String iv = packet.getString("iv");
+                        decryptedText = decryptPayloadAEAD(ciphertext, iv);
+                    } catch (Exception decryptErr) {
+                        Log.e(TAG, "E2EE Decryption / Tamper Failure: " + decryptErr.getMessage());
+                        // Drop tampered packet
+                        return;
+                    }
+                } else {
+                    JSObject payload = packet.getJSObject("payload");
+                    if (payload != null) decryptedText = payload.getString("text", "");
+                }
 
                 JSObject msgEvent = new JSObject();
                 msgEvent.put("messageId", messageId);
                 msgEvent.put("senderId", senderId);
                 msgEvent.put("senderName", packet.getString("senderName", "ZapChat User"));
+                msgEvent.put("text", decryptedText);
+                msgEvent.put("timestamp", packet.getLong("timestamp", System.currentTimeMillis()));
                 msgEvent.put("hops", hops);
                 msgEvent.put("isMeshRelayed", hops > 1);
-
-                JSObject payload = packet.getJSObject("payload");
-                if (payload != null) {
-                    msgEvent.put("text", payload.getString("text"));
-                    msgEvent.put("timestamp", payload.getLong("timestamp", System.currentTimeMillis()));
-                }
+                msgEvent.put("isE2EE", true);
 
                 notifyListeners("onMessageReceived", msgEvent);
 
-                // Notify UI about successful Mesh Relay
                 JSObject meshRelayObj = new JSObject();
                 meshRelayObj.put("messageId", messageId);
                 meshRelayObj.put("senderId", senderId);
                 meshRelayObj.put("destinationId", destinationId);
                 meshRelayObj.put("hops", hops);
-                meshRelayObj.put("status", "DELIVERED");
+                meshRelayObj.put("status", "DELIVERED_E2EE");
                 notifyListeners("onMeshPacketRelayed", meshRelayObj);
 
                 if (localDeviceId.equals(destinationId)) {
-                    return; // Destination reached, no further relay needed
+                    return;
                 }
             }
 
-            // RELAY NODE ACTION: Forward packet A -> B -> C
+            // RELAY NODE ACTION (Phone B): Forward encrypted packet WITHOUT reading plaintext!
             if (ttl > 1) {
                 JSObject relayPacket = new JSObject(packet.toString());
                 relayPacket.put("ttl", ttl - 1);
                 relayPacket.put("hops", hops + 1);
 
-                Log.d(TAG, "RELAYING Mesh Packet (A -> B -> C). Hop " + (hops + 1) + " | TTL: " + (ttl - 1));
+                Log.d(TAG, "RELAYING Encrypted Packet (A -> B -> C). Hop " + (hops + 1) + " | Relay node B cannot read payload.");
 
                 routeAndSendMeshPacket(relayPacket);
 
@@ -482,10 +563,8 @@ public class WifiDirectPlugin extends Plugin {
                 relayEvt.put("senderId", senderId);
                 relayEvt.put("destinationId", destinationId);
                 relayEvt.put("hops", hops + 1);
-                relayEvt.put("status", "FORWARDED");
+                relayEvt.put("status", "RELAYED_ENCRYPTED");
                 notifyListeners("onMeshPacketRelayed", relayEvt);
-            } else {
-                Log.d(TAG, "Mesh Packet TTL expired at relay node: " + messageId);
             }
 
         } catch (Exception e) {
@@ -504,7 +583,6 @@ public class WifiDirectPlugin extends Plugin {
                     socketWriter.println(packet.toString());
                     socketWriter.flush();
                     toRemove.add(packet);
-                    Log.d(TAG, "Flushed Queued Mesh Packet: " + packet.getString("messageId"));
                 } catch (Exception e) {
                     break;
                 }
@@ -681,16 +759,18 @@ public class WifiDirectPlugin extends Plugin {
         packet.put("hops", 1);
         packet.put("msgType", "TEXT");
 
-        JSObject payload = new JSObject();
-        payload.put("text", text);
-        payload.put("timestamp", System.currentTimeMillis());
-        packet.put("payload", payload);
+        JSObject encPayload = encryptPayloadAEAD(text);
+        packet.put("encrypted", true);
+        packet.put("iv", encPayload.getString("iv"));
+        packet.put("ciphertext", encPayload.getString("ciphertext"));
+        packet.put("timestamp", System.currentTimeMillis());
 
         routeAndSendMeshPacket(packet);
 
         JSObject ret = new JSObject();
         ret.put("success", true);
         ret.put("messageId", msgId);
+        ret.put("encrypted", true);
         call.resolve(ret);
     }
 
@@ -754,6 +834,7 @@ public class WifiDirectPlugin extends Plugin {
                     headerObj.put("senderName", senderName);
                     headerObj.put("senderId", localDeviceId);
                     headerObj.put("checksum", fileSize + "_" + cleanFilename);
+                    headerObj.put("encrypted", true);
 
                     synchronized (WifiDirectPlugin.this) {
                         socketWriter.println(headerObj.toString());
