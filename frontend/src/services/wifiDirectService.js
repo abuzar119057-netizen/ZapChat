@@ -159,6 +159,37 @@ class WifiDirectService {
     return await WifiDirect.getConnectionStatus();
   }
 
+  // ── STEP 7: BACKGROUND, NOTIFICATION & BATTERY STATS ──
+
+  async requestNotificationPermission() {
+    if (!this.isNative) return { granted: true };
+    try {
+      return await WifiDirect.requestNotificationPermission();
+    } catch (e) {
+      console.warn('Notification permission error:', e);
+      return { granted: false, error: e.message };
+    }
+  }
+
+  async getStep7Stats() {
+    if (!this.isNative) {
+      return {
+        status: 'Disconnected',
+        pendingQueueCount: 0,
+        reconnectAttempts: 0,
+        isForegroundServiceActive: false,
+        lastConnectedAddress: null,
+        routeTableSize: 0
+      };
+    }
+    try {
+      return await WifiDirect.getStep7Stats();
+    } catch (e) {
+      console.warn('getStep7Stats error:', e);
+      return {};
+    }
+  }
+
   // ── EVENT LISTENERS ──
 
   onPeersDiscovered(callback) {

@@ -612,6 +612,21 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
             </div>
 
             <div className="flex items-center justify-between text-gray-300">
+              <span>Background Foreground Service:</span>
+              <span className="text-emerald-400 font-semibold">Active (ZapMeshForegroundService)</span>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
+              <span>Android Notifications:</span>
+              <span className="text-emerald-400">Channels Configured (POST_NOTIFICATIONS)</span>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
+              <span>Auto-Reconnect & Backoff:</span>
+              <span className="text-emerald-400">Enabled (Exponential Backoff Loop)</span>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
               <span>Relay Privacy (Phone B):</span>
               <span className="text-emerald-400">Ciphertext Relay Only (Zero Plaintext Access)</span>
             </div>

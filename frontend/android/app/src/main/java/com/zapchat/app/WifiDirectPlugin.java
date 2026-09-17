@@ -27,17 +27,23 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Base64;
 import android.util.Log;
 import android.graphics.SurfaceTexture;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -80,7 +86,8 @@ import javax.crypto.spec.SecretKeySpec;
         @Permission(alias = "location", strings = { Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION }),
         @Permission(alias = "wifi", strings = { Manifest.permission.ACCESS_WIFI_STATE, Manifest.permission.CHANGE_WIFI_STATE }),
         @Permission(alias = "audio", strings = { Manifest.permission.RECORD_AUDIO, Manifest.permission.MODIFY_AUDIO_SETTINGS }),
-        @Permission(alias = "camera", strings = { Manifest.permission.CAMERA })
+        @Permission(alias = "camera", strings = { Manifest.permission.CAMERA }),
+        @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS })
     }
 )
 public class WifiDirectPlugin extends Plugin {
@@ -148,6 +155,125 @@ public class WifiDirectPlugin extends Plugin {
     private final Map<String, RouteEntry> routeTable = new ConcurrentHashMap<>();
     private final List<JSObject> offlineMeshQueue = Collections.synchronizedList(new ArrayList<>());
 
+    // ── STEP 7: BACKGROUND, BATTERY OPTIMIZATION & AUTO-RECONNECT ──
+    private PowerManager.WakeLock wakeLock;
+    private final Handler discoveryHandler = new Handler(Looper.getMainLooper());
+    private int discoveryAttemptCount = 0;
+    private boolean isAdaptiveDiscoveryRunning = false;
+    private boolean isManualDisconnect = false;
+    private int reconnectAttempts = 0;
+    private static final int MAX_RECONNECT_ATTEMPTS = 5;
+    private String lastConnectedAddress = null;
+
+    private void acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ZapChat:MediaTransferWakeLock");
+                }
+            }
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire(10 * 60 * 1000L);
+                Log.d(TAG, "Partial WakeLock acquired for active media/transfer session.");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error acquiring WakeLock: " + e.getMessage());
+        }
+    }
+
+    private void releaseWakeLock() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+                Log.d(TAG, "Partial WakeLock released.");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error releasing WakeLock: " + e.getMessage());
+        }
+    }
+
+    private void startMeshForegroundService(String status) {
+        try {
+            Context context = getContext();
+            Intent serviceIntent = new Intent(context, ZapMeshForegroundService.class);
+            serviceIntent.setAction(ZapMeshForegroundService.ACTION_START_SERVICE);
+            serviceIntent.putExtra(ZapMeshForegroundService.EXTRA_STATUS_TEXT, status);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent);
+            } else {
+                context.startService(serviceIntent);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error starting foreground service: " + e.getMessage());
+        }
+    }
+
+    private void saveOfflineQueueToPrefs() {
+        try {
+            Context context = getContext();
+            SharedPreferences prefs = context.getSharedPreferences("ZapChatMeshPrefs", Context.MODE_PRIVATE);
+            JSONArray jsonArray = new JSONArray();
+            synchronized (offlineMeshQueue) {
+                for (JSObject packet : offlineMeshQueue) {
+                    jsonArray.put(new JSONObject(packet.toString()));
+                }
+            }
+            prefs.edit().putString("persistedOfflineQueue", jsonArray.toString()).apply();
+        } catch (Exception e) {
+            Log.e(TAG, "Error saving offline queue to prefs: " + e.getMessage());
+        }
+    }
+
+    private void loadOfflineQueueFromPrefs() {
+        try {
+            Context context = getContext();
+            SharedPreferences prefs = context.getSharedPreferences("ZapChatMeshPrefs", Context.MODE_PRIVATE);
+            String saved = prefs.getString("persistedOfflineQueue", null);
+            if (saved != null && !saved.isEmpty()) {
+                JSONArray jsonArray = new JSONArray(saved);
+                synchronized (offlineMeshQueue) {
+                    offlineMeshQueue.clear();
+                    for (int i = 0; i < jsonArray.length(); i++) {
+                        JSONObject obj = jsonArray.getJSONObject(i);
+                        offlineMeshQueue.add(JSObject.fromJSONObject(obj));
+                    }
+                }
+                Log.d(TAG, "Loaded " + offlineMeshQueue.size() + " persisted offline queue messages.");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error loading offline queue from prefs: " + e.getMessage());
+        }
+    }
+
+    private void scheduleAutoReconnect() {
+        if (isManualDisconnect || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            Log.d(TAG, "Auto-reconnect cancelled: manual disconnect or max retries reached.");
+            return;
+        }
+
+        reconnectAttempts++;
+        updateStatus("Reconnecting");
+        long backoffDelay = Math.min(3000L * reconnectAttempts, 30000L);
+        Log.d(TAG, "Scheduling Auto-reconnect attempt " + reconnectAttempts + " in " + backoffDelay + " ms");
+
+        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (!"Connected".equals(currentStatus) && lastConnectedAddress != null) {
+                    try {
+                        WifiP2pConfig config = new WifiP2pConfig();
+                        config.deviceAddress = lastConnectedAddress;
+                        config.wps.setup = WpsInfo.PBC;
+                        if (manager != null && channel != null) {
+                            manager.connect(channel, config, null);
+                        }
+                    } catch (SecurityException ignored) {}
+                }
+            }
+        }, backoffDelay);
+    }
+
     public static class RouteEntry {
         public String destinationId;
         public String nextHopId;
@@ -188,6 +314,11 @@ public class WifiDirectPlugin extends Plugin {
     public void load() {
         super.load();
         Context context = getContext();
+
+        // Initialize Android Notification Channels & Load Persisted Queue
+        ZapNotificationManager.createNotificationChannels(context);
+        loadOfflineQueueFromPrefs();
+        startMeshForegroundService("ZapChat E2EE Mesh Listener Active");
 
         // Initialize local device identity & AES-256 E2EE Cryptographic Key
         SharedPreferences prefs = context.getSharedPreferences("ZapChatMeshPrefs", Context.MODE_PRIVATE);
@@ -1456,9 +1587,15 @@ public class WifiDirectPlugin extends Plugin {
                                     String messageId = obj.getString("messageId");
                                     if (messageId != null && processedMessageIds.contains(messageId)) continue;
                                     if (messageId != null) processedMessageIds.add(messageId);
+
+                                    String senderName = obj.getString("senderName", "ZapChat Peer");
+                                    String text = obj.getString("text", "Encrypted message");
+                                    ZapNotificationManager.showMessageNotification(getContext(), senderName, text);
+
                                     notifyListeners("onMessageReceived", obj);
 
                                 } else if ("FILE_HEADER".equals(type)) {
+                                    acquireWakeLock();
                                     handleIncomingFileHeader(obj);
 
                                 } else if ("FILE_CHUNK".equals(type)) {
@@ -1468,26 +1605,28 @@ public class WifiDirectPlugin extends Plugin {
                                     handleIncomingFileComplete(obj);
 
                                 } else if ("CALL_REQUEST".equals(type)) {
+                                    acquireWakeLock();
                                     activeCallId = obj.getString("callId");
                                     isVideoCall = obj.getBoolean("isVideo", false);
+                                    String callerName = obj.getString("senderName", "ZapChat Peer");
+                                    ZapNotificationManager.showIncomingCallNotification(getContext(), callerName, isVideoCall, activeCallId);
                                     notifyListeners("onCallRequest", obj);
 
                                 } else if ("CALL_ACCEPT".equals(type)) {
+                                    acquireWakeLock();
+                                    ZapNotificationManager.cancelCallNotification(getContext());
                                     startVoiceCallEngine();
                                     if (isVideoCall) {
                                         startVideoEngine();
                                     }
                                     notifyListeners("onCallAccepted", obj);
 
-                                } else if ("CALL_REJECT".equals(type)) {
+                                } else if ("CALL_REJECT".equals(type) || "CALL_END".equals(type)) {
+                                    releaseWakeLock();
+                                    ZapNotificationManager.cancelCallNotification(getContext());
                                     stopVideoEngine();
                                     stopVoiceCallEngine();
-                                    notifyListeners("onCallRejected", obj);
-
-                                } else if ("CALL_END".equals(type)) {
-                                    stopVideoEngine();
-                                    stopVoiceCallEngine();
-                                    notifyListeners("onCallEnded", obj);
+                                    notifyListeners("CALL_REJECT".equals(type) ? "onCallRejected" : "onCallEnded", obj);
                                 }
 
                             } catch (Exception parseEx) {
@@ -1498,8 +1637,10 @@ public class WifiDirectPlugin extends Plugin {
                         Log.d(TAG, "P2P Socket Reader Closed: " + e.getMessage());
                     } finally {
                         updateStatus("Disconnected");
+                        releaseWakeLock();
                         stopVideoEngine();
                         stopVoiceCallEngine();
+                        scheduleAutoReconnect();
                         JSObject statusObj = new JSObject();
                         statusObj.put("status", "Disconnected");
                         statusObj.put("reason", "Connection lost");
@@ -1648,10 +1789,41 @@ public class WifiDirectPlugin extends Plugin {
         }
     }
 
+    @PluginMethod
+    public void requestNotificationPermission(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestPermissionForAlias("notifications", call, "notificationsCallback");
+        } else {
+            JSObject ret = new JSObject();
+            ret.put("granted", true);
+            call.resolve(ret);
+        }
+    }
+
+    @PermissionCallback
+    private void notificationsCallback(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("granted", getPermissionState("notifications") == PermissionState.GRANTED);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void getStep7Stats(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("status", currentStatus);
+        ret.put("pendingQueueCount", offlineMeshQueue.size());
+        ret.put("reconnectAttempts", reconnectAttempts);
+        ret.put("isForegroundServiceActive", ZapMeshForegroundService.getInstance() != null);
+        ret.put("lastConnectedAddress", lastConnectedAddress);
+        ret.put("routeTableSize", routeTable.size());
+        call.resolve(ret);
+    }
+
     @Override
     protected void handleOnDestroy() {
         stopVideoEngine();
         stopVoiceCallEngine();
+        releaseWakeLock();
         closeSockets();
         if (receiver != null) {
             try {
