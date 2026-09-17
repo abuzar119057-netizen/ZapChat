@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.NetworkInfo;
+import android.net.Uri;
 import android.net.wifi.p2p.WifiP2pConfig;
 import android.net.wifi.p2p.WifiP2pDevice;
 import android.net.wifi.p2p.WifiP2pDeviceList;
@@ -13,8 +14,10 @@ import android.net.wifi.p2p.WifiP2pInfo;
 import android.net.wifi.p2p.WifiP2pManager;
 import android.net.wifi.WpsInfo;
 import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Base64;
 import android.util.Log;
 
 import com.getcapacitor.JSArray;
@@ -25,18 +28,24 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
-import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -50,6 +59,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class WifiDirectPlugin extends Plugin {
     private static final String TAG = "WifiDirectPlugin";
     private static final int P2P_PORT = 8888;
+    private static final int CHUNK_SIZE = 32768; // 32 KB streaming chunks
 
     private WifiP2pManager manager;
     private WifiP2pManager.Channel channel;
@@ -69,6 +79,29 @@ public class WifiDirectPlugin extends Plugin {
     private Thread readerThread;
 
     private final Set<String> processedMessageIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final Map<String, FileTransferSession> activeReceivingTransfers = new ConcurrentHashMap<>();
+
+    private static class FileTransferSession {
+        String transferId;
+        String filename;
+        String mimeType;
+        long fileSize;
+        long receivedBytes;
+        long startTime;
+        File targetFile;
+        BufferedOutputStream outputStream;
+
+        FileTransferSession(String transferId, String filename, String mimeType, long fileSize, File targetFile, BufferedOutputStream outputStream) {
+            this.transferId = transferId;
+            this.filename = filename;
+            this.mimeType = mimeType;
+            this.fileSize = fileSize;
+            this.targetFile = targetFile;
+            this.outputStream = outputStream;
+            this.receivedBytes = 0;
+            this.startTime = System.currentTimeMillis();
+        }
+    }
 
     @Override
     public void load() {
@@ -119,11 +152,6 @@ public class WifiDirectPlugin extends Plugin {
                             }
                         }
                     }
-                } else if (WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION.equals(action)) {
-                    WifiP2pDevice device = intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE);
-                    if (device != null) {
-                        Log.d(TAG, "This Device Name: " + device.deviceName + " | Address: " + device.deviceAddress);
-                    }
                 }
             }
         };
@@ -155,7 +183,6 @@ public class WifiDirectPlugin extends Plugin {
                 jsPeers.put(devObj);
             }
 
-            Log.d(TAG, "Discovered " + peersList.size() + " nearby Wi-Fi Direct devices.");
             if (peersList.size() > 0 && "Searching".equals(currentStatus)) {
                 updateStatus("Device Found");
             }
@@ -172,8 +199,6 @@ public class WifiDirectPlugin extends Plugin {
         public void onConnectionInfoAvailable(WifiP2pInfo info) {
             if (info.groupFormed) {
                 String groupOwnerIp = info.groupOwnerAddress != null ? info.groupOwnerAddress.getHostAddress() : "";
-                Log.d(TAG, "Wi-Fi P2P Group Formed! Is Group Owner: " + info.isGroupOwner + " | GO IP: " + groupOwnerIp);
-
                 updateStatus("Connected");
 
                 JSObject connObj = new JSObject();
@@ -197,8 +222,7 @@ public class WifiDirectPlugin extends Plugin {
     @PluginMethod
     public void checkPermissions(PluginCall call) {
         JSObject ret = new JSObject();
-        boolean hasPermission = hasRequiredPermissions();
-        ret.put("granted", hasPermission);
+        ret.put("granted", hasRequiredPermissions());
         call.resolve(ret);
     }
 
@@ -222,7 +246,6 @@ public class WifiDirectPlugin extends Plugin {
             manager.discoverPeers(channel, new WifiP2pManager.ActionListener() {
                 @Override
                 public void onSuccess() {
-                    Log.d(TAG, "Wi-Fi Direct Peer Discovery Started.");
                     updateStatus("Searching");
                     JSObject ret = new JSObject();
                     ret.put("status", "Searching");
@@ -232,14 +255,12 @@ public class WifiDirectPlugin extends Plugin {
                 @Override
                 public void onFailure(int reason) {
                     String errorMsg = getFailureReasonText(reason);
-                    Log.e(TAG, "Discovery failed: " + errorMsg);
                     updateStatus("Disconnected");
-                    notifyError("Wi-Fi Direct Discovery Failed: " + errorMsg + ". Make sure Wi-Fi and Location are turned ON.");
+                    notifyError("Wi-Fi Direct Discovery Failed: " + errorMsg);
                     call.reject("Discovery failed: " + errorMsg);
                 }
             });
         } catch (SecurityException e) {
-            Log.e(TAG, "SecurityException in startDiscovery: " + e.getMessage());
             call.reject("Permission denied: Please grant Nearby Devices / Location permission.");
         }
     }
@@ -255,7 +276,6 @@ public class WifiDirectPlugin extends Plugin {
             manager.stopPeerDiscovery(channel, new WifiP2pManager.ActionListener() {
                 @Override
                 public void onSuccess() {
-                    Log.d(TAG, "Stopped Peer Discovery.");
                     call.resolve();
                 }
 
@@ -291,7 +311,6 @@ public class WifiDirectPlugin extends Plugin {
             manager.connect(channel, config, new WifiP2pManager.ActionListener() {
                 @Override
                 public void onSuccess() {
-                    Log.d(TAG, "Connection initiated to " + deviceAddress);
                     JSObject ret = new JSObject();
                     ret.put("status", "Connecting");
                     ret.put("deviceAddress", deviceAddress);
@@ -301,7 +320,6 @@ public class WifiDirectPlugin extends Plugin {
                 @Override
                 public void onFailure(int reason) {
                     String errorMsg = getFailureReasonText(reason);
-                    Log.e(TAG, "Connection failed: " + errorMsg);
                     updateStatus("Disconnected");
                     notifyError("Failed to connect to device: " + errorMsg);
                     call.reject("Connection failed: " + errorMsg);
@@ -320,7 +338,6 @@ public class WifiDirectPlugin extends Plugin {
                 manager.removeGroup(channel, new WifiP2pManager.ActionListener() {
                     @Override
                     public void onSuccess() {
-                        Log.d(TAG, "Disconnected and Wi-Fi Direct group removed.");
                         updateStatus("Disconnected");
                         call.resolve();
                     }
@@ -363,7 +380,7 @@ public class WifiDirectPlugin extends Plugin {
         }
 
         final String finalMsgId = messageId;
-        final String jsonMessage = buildMessageJson(finalMsgId, text, senderId, senderName);
+        final String jsonMessage = buildTextJson(finalMsgId, text, senderId, senderName);
 
         new Thread(new Runnable() {
             @Override
@@ -376,14 +393,152 @@ public class WifiDirectPlugin extends Plugin {
                             processedMessageIds.add(finalMsgId);
                         }
                     }
-                    Log.d(TAG, "P2P Message Sent Successfully! ID: " + finalMsgId);
                     JSObject ret = new JSObject();
                     ret.put("success", true);
                     ret.put("messageId", finalMsgId);
                     call.resolve(ret);
                 } catch (Exception e) {
-                    Log.e(TAG, "Failed to send P2P message: " + e.getMessage());
                     call.reject("Failed to send message: " + e.getMessage());
+                }
+            }
+        }).start();
+    }
+
+    @PluginMethod
+    public void sendFile(PluginCall call) {
+        String filePath = call.getString("filePath");
+        String rawFilename = call.getString("filename", "file_" + System.currentTimeMillis());
+        String mimeType = call.getString("mimeType", "application/octet-stream");
+        String transferId = call.getString("transferId");
+        String senderName = call.getString("senderName", "ZapChat User");
+        String senderId = call.getString("senderId", "local_user");
+
+        if (filePath == null || filePath.isEmpty()) {
+            call.reject("filePath is required.");
+            return;
+        }
+
+        if (transferId == null || transferId.isEmpty()) {
+            transferId = "ft_" + System.currentTimeMillis() + "_" + (int)(Math.random() * 10000);
+        }
+
+        if (activeSocket == null || !activeSocket.isConnected() || socketWriter == null) {
+            call.reject("No active Wi-Fi Direct connection.");
+            return;
+        }
+
+        final String finalTransferId = transferId;
+        final String cleanFilename = sanitizeFilename(rawFilename);
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                InputStream inputStream = null;
+                try {
+                    Context context = getContext();
+                    Uri fileUri = Uri.parse(filePath);
+                    if (filePath.startsWith("content://")) {
+                        inputStream = context.getContentResolver().openInputStream(fileUri);
+                    } else if (filePath.startsWith("file://")) {
+                        inputStream = new FileInputStream(new File(fileUri.getPath()));
+                    } else {
+                        inputStream = new FileInputStream(new File(filePath));
+                    }
+
+                    if (inputStream == null) {
+                        call.reject("File not found at path: " + filePath);
+                        return;
+                    }
+
+                    long fileSize = inputStream.available();
+                    if (fileSize <= 0) {
+                        // Fallback file size check
+                        File f = new File(filePath.replace("file://", ""));
+                        if (f.exists()) fileSize = f.length();
+                    }
+
+                    // 1. Send FILE_HEADER
+                    JSObject headerObj = new JSObject();
+                    headerObj.put("type", "FILE_HEADER");
+                    headerObj.put("transferId", finalTransferId);
+                    headerObj.put("filename", cleanFilename);
+                    headerObj.put("mimeType", mimeType);
+                    headerObj.put("fileSize", fileSize);
+                    headerObj.put("senderName", senderName);
+                    headerObj.put("senderId", senderId);
+                    headerObj.put("checksum", fileSize + "_" + cleanFilename);
+
+                    synchronized (WifiDirectPlugin.this) {
+                        socketWriter.println(headerObj.toString());
+                        socketWriter.flush();
+                    }
+
+                    // 2. Stream File Chunks in 32 KB buffers
+                    byte[] buffer = new byte[CHUNK_SIZE];
+                    int bytesRead;
+                    long totalSent = 0;
+                    long startTime = System.currentTimeMillis();
+
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        if (activeSocket == null || !activeSocket.isConnected()) {
+                            call.reject("Connection lost during file transfer.");
+                            return;
+                        }
+
+                        byte[] actualBytes = new byte[bytesRead];
+                        System.arraycopy(buffer, 0, actualBytes, 0, bytesRead);
+                        String base64Chunk = Base64.encodeToString(actualBytes, Base64.NO_WRAP);
+
+                        JSObject chunkObj = new JSObject();
+                        chunkObj.put("type", "FILE_CHUNK");
+                        chunkObj.put("transferId", finalTransferId);
+                        chunkObj.put("data", base64Chunk);
+
+                        synchronized (WifiDirectPlugin.this) {
+                            socketWriter.println(chunkObj.toString());
+                            socketWriter.flush();
+                        }
+
+                        totalSent += bytesRead;
+                        long elapsedSec = Math.max(1, (System.currentTimeMillis() - startTime) / 1000);
+                        double speedKbps = (totalSent / 1024.0) / elapsedSec;
+                        int percent = fileSize > 0 ? (int) ((totalSent * 100) / fileSize) : 0;
+
+                        // Emit Upload Progress event to JS
+                        JSObject progressObj = new JSObject();
+                        progressObj.put("transferId", finalTransferId);
+                        progressObj.put("transferredBytes", totalSent);
+                        progressObj.put("totalBytes", fileSize);
+                        progressObj.put("percent", percent);
+                        progressObj.put("speed", String.format("%.1f KB/s", speedKbps));
+                        progressObj.put("direction", "upload");
+                        notifyListeners("onFileTransferProgress", progressObj);
+                    }
+
+                    // 3. Send FILE_COMPLETE
+                    JSObject completeObj = new JSObject();
+                    completeObj.put("type", "FILE_COMPLETE");
+                    completeObj.put("transferId", finalTransferId);
+
+                    synchronized (WifiDirectPlugin.this) {
+                        socketWriter.println(completeObj.toString());
+                        socketWriter.flush();
+                    }
+
+                    JSObject ret = new JSObject();
+                    ret.put("success", true);
+                    ret.put("transferId", finalTransferId);
+                    ret.put("filename", cleanFilename);
+                    ret.put("fileSize", fileSize);
+                    call.resolve(ret);
+
+                } catch (Exception e) {
+                    Log.e(TAG, "File Transfer Error: " + e.getMessage());
+                    call.reject("File transfer failed: " + e.getMessage());
+                } finally {
+                    if (inputStream != null) {
+                        try { inputStream.close(); } catch (Exception ignored) {}
+                    }
                 }
             }
         }).start();
@@ -397,8 +552,9 @@ public class WifiDirectPlugin extends Plugin {
         call.resolve(ret);
     }
 
-    private String buildMessageJson(String messageId, String text, String senderId, String senderName) {
+    private String buildTextJson(String messageId, String text, String senderId, String senderName) {
         JSObject obj = new JSObject();
+        obj.put("type", "TEXT");
         obj.put("messageId", messageId);
         obj.put("text", text);
         obj.put("senderId", senderId);
@@ -415,10 +571,7 @@ public class WifiDirectPlugin extends Plugin {
                 try {
                     serverSocket = new ServerSocket(P2P_PORT);
                     serverSocket.setReuseAddress(true);
-                    Log.d(TAG, "ServerThread listening on port " + P2P_PORT);
-
                     Socket socket = serverSocket.accept();
-                    Log.d(TAG, "Server accepted incoming P2P socket connection from " + socket.getInetAddress().getHostAddress());
                     activeSocket = socket;
                     setupSocketStreams(socket);
                 } catch (IOException e) {
@@ -435,7 +588,6 @@ public class WifiDirectPlugin extends Plugin {
             @Override
             public void run() {
                 Socket socket = null;
-                // Retry connecting up to 5 times (Wait for GO ServerSocket binding)
                 for (int i = 0; i < 5; i++) {
                     try {
                         Thread.sleep(800);
@@ -447,11 +599,9 @@ public class WifiDirectPlugin extends Plugin {
                 }
 
                 if (socket != null && socket.isConnected()) {
-                    Log.d(TAG, "Client connected to GO Server at " + hostIp);
                     activeSocket = socket;
                     setupSocketStreams(socket);
                 } else {
-                    Log.e(TAG, "Client failed to connect to GO Server at " + hostIp);
                     notifyError("Failed to connect to device socket.");
                 }
             }
@@ -471,23 +621,28 @@ public class WifiDirectPlugin extends Plugin {
                         String line;
                         while ((line = socketReader.readLine()) != null) {
                             if (line.trim().isEmpty()) continue;
-                            Log.d(TAG, "Incoming P2P Line: " + line);
                             try {
-                                JSObject msgObj = new JSObject(line);
-                                String messageId = msgObj.getString("messageId");
+                                JSObject obj = new JSObject(line);
+                                String type = obj.getString("type", "TEXT");
 
-                                if (messageId != null && processedMessageIds.contains(messageId)) {
-                                    Log.d(TAG, "Duplicate P2P message ignored: " + messageId);
-                                    continue;
+                                if ("TEXT".equals(type)) {
+                                    String messageId = obj.getString("messageId");
+                                    if (messageId != null && processedMessageIds.contains(messageId)) continue;
+                                    if (messageId != null) processedMessageIds.add(messageId);
+                                    notifyListeners("onMessageReceived", obj);
+
+                                } else if ("FILE_HEADER".equals(type)) {
+                                    handleIncomingFileHeader(obj);
+
+                                } else if ("FILE_CHUNK".equals(type)) {
+                                    handleIncomingFileChunk(obj);
+
+                                } else if ("FILE_COMPLETE".equals(type)) {
+                                    handleIncomingFileComplete(obj);
                                 }
 
-                                if (messageId != null) {
-                                    processedMessageIds.add(messageId);
-                                }
-
-                                notifyListeners("onMessageReceived", msgObj);
                             } catch (Exception parseEx) {
-                                Log.e(TAG, "Error parsing P2P message JSON: " + parseEx.getMessage());
+                                Log.e(TAG, "Error parsing incoming P2P frame: " + parseEx.getMessage());
                             }
                         }
                     } catch (IOException e) {
@@ -505,6 +660,95 @@ public class WifiDirectPlugin extends Plugin {
         } catch (IOException e) {
             Log.e(TAG, "Error setting up P2P socket streams: " + e.getMessage());
         }
+    }
+
+    private void handleIncomingFileHeader(JSObject obj) {
+        try {
+            String transferId = obj.getString("transferId");
+            String rawFilename = obj.getString("filename", "received_file");
+            String mimeType = obj.getString("mimeType", "application/octet-stream");
+            long fileSize = obj.getLong("fileSize", 0);
+
+            String cleanFilename = sanitizeFilename(rawFilename);
+            Context ctx = getContext();
+            File downloadsDir = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (downloadsDir == null) downloadsDir = ctx.getFilesDir();
+
+            File targetFile = new File(downloadsDir, cleanFilename);
+            BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(targetFile));
+
+            FileTransferSession session = new FileTransferSession(transferId, cleanFilename, mimeType, fileSize, targetFile, bos);
+            activeReceivingTransfers.put(transferId, session);
+
+            Log.d(TAG, "Incoming P2P File Header: " + cleanFilename + " | Size: " + fileSize + " bytes");
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error handling FILE_HEADER: " + e.getMessage());
+        }
+    }
+
+    private void handleIncomingFileChunk(JSObject obj) {
+        try {
+            String transferId = obj.getString("transferId");
+            String base64Data = obj.getString("data");
+
+            FileTransferSession session = activeReceivingTransfers.get(transferId);
+            if (session != null && session.outputStream != null) {
+                byte[] chunkBytes = Base64.decode(base64Data, Base64.NO_WRAP);
+                session.outputStream.write(chunkBytes);
+                session.receivedBytes += chunkBytes.length;
+
+                long elapsedSec = Math.max(1, (System.currentTimeMillis() - session.startTime) / 1000);
+                double speedKbps = (session.receivedBytes / 1024.0) / elapsedSec;
+                int percent = session.fileSize > 0 ? (int) ((session.receivedBytes * 100) / session.fileSize) : 0;
+
+                JSObject progressObj = new JSObject();
+                progressObj.put("transferId", transferId);
+                progressObj.put("transferredBytes", session.receivedBytes);
+                progressObj.put("totalBytes", session.fileSize);
+                progressObj.put("percent", percent);
+                progressObj.put("speed", String.format("%.1f KB/s", speedKbps));
+                progressObj.put("direction", "download");
+                notifyListeners("onFileTransferProgress", progressObj);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error handling FILE_CHUNK: " + e.getMessage());
+        }
+    }
+
+    private void handleIncomingFileComplete(JSObject obj) {
+        try {
+            String transferId = obj.getString("transferId");
+            FileTransferSession session = activeReceivingTransfers.remove(transferId);
+
+            if (session != null) {
+                try {
+                    session.outputStream.flush();
+                    session.outputStream.close();
+                } catch (Exception ignored) {}
+
+                File receivedFile = session.targetFile;
+                Log.d(TAG, "P2P File Transfer Completed! Saved to: " + receivedFile.getAbsolutePath());
+
+                JSObject fileReceivedObj = new JSObject();
+                fileReceivedObj.put("transferId", transferId);
+                fileReceivedObj.put("filename", session.filename);
+                fileReceivedObj.put("mimeType", session.mimeType);
+                fileReceivedObj.put("fileSize", receivedFile.length());
+                fileReceivedObj.put("filePath", receivedFile.getAbsolutePath());
+                fileReceivedObj.put("fileUrl", "file://" + receivedFile.getAbsolutePath());
+                notifyListeners("onFileReceived", fileReceivedObj);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error handling FILE_COMPLETE: " + e.getMessage());
+        }
+    }
+
+    private String sanitizeFilename(String filename) {
+        if (filename == null || filename.trim().isEmpty()) return "file_" + System.currentTimeMillis();
+        // Remove path traversal attempts
+        String nameOnly = new File(filename).getName();
+        return nameOnly.replaceAll("[^a-zA-Z0-9._-]", "_");
     }
 
     private synchronized void closeSockets() {
@@ -528,7 +772,6 @@ public class WifiDirectPlugin extends Plugin {
 
     private void updateStatus(String status) {
         this.currentStatus = status;
-        Log.d(TAG, "Wi-Fi Direct Status Changed: " + status);
         JSObject statusObj = new JSObject();
         statusObj.put("status", status);
         notifyListeners("onConnectionStatusChanged", statusObj);

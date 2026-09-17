@@ -6,7 +6,6 @@ const WifiDirect = Capacitor.Plugins.WifiDirect;
 class WifiDirectService {
   constructor() {
     this.isNative = Capacitor.isNativePlatform() && !!WifiDirect;
-    this.listeners = new Map();
   }
 
   isNativeAvailable() {
@@ -15,7 +14,7 @@ class WifiDirectService {
 
   async checkPermissions() {
     if (!this.isNative) {
-      return { granted: false, reason: 'Web browser environment — Wi-Fi Direct requires a physical Android phone with native APK built.' };
+      return { granted: false, reason: 'Web browser environment — Wi-Fi Direct requires a physical Android phone.' };
     }
     try {
       return await WifiDirect.checkPermissions();
@@ -39,7 +38,7 @@ class WifiDirectService {
 
   async startDiscovery() {
     if (!this.isNative) {
-      throw new Error('Wi-Fi Direct P2P offline messaging is supported on Android native devices only.');
+      throw new Error('Wi-Fi Direct P2P is supported on Android native devices only.');
     }
     return await WifiDirect.startDiscovery();
   }
@@ -68,6 +67,13 @@ class WifiDirectService {
     return await WifiDirect.sendMessage(msgData);
   }
 
+  async sendFile(fileData) {
+    if (!this.isNative) {
+      throw new Error('Wi-Fi Direct file transfer is supported on native Android devices only.');
+    }
+    return await WifiDirect.sendFile(fileData);
+  }
+
   async getConnectionStatus() {
     if (!this.isNative) {
       return { status: 'Disconnected', isConnected: false };
@@ -77,26 +83,32 @@ class WifiDirectService {
 
   onPeersDiscovered(callback) {
     if (!this.isNative) return { remove: () => {} };
-    const handle = WifiDirect.addListener('onPeersDiscovered', (data) => callback(data));
-    return handle;
+    return WifiDirect.addListener('onPeersDiscovered', (data) => callback(data));
   }
 
   onConnectionStatusChanged(callback) {
     if (!this.isNative) return { remove: () => {} };
-    const handle = WifiDirect.addListener('onConnectionStatusChanged', (data) => callback(data));
-    return handle;
+    return WifiDirect.addListener('onConnectionStatusChanged', (data) => callback(data));
   }
 
   onMessageReceived(callback) {
     if (!this.isNative) return { remove: () => {} };
-    const handle = WifiDirect.addListener('onMessageReceived', (data) => callback(data));
-    return handle;
+    return WifiDirect.addListener('onMessageReceived', (data) => callback(data));
+  }
+
+  onFileTransferProgress(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onFileTransferProgress', (data) => callback(data));
+  }
+
+  onFileReceived(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onFileReceived', (data) => callback(data));
   }
 
   onError(callback) {
     if (!this.isNative) return { remove: () => {} };
-    const handle = WifiDirect.addListener('onError', (data) => callback(data));
-    return handle;
+    return WifiDirect.addListener('onError', (data) => callback(data));
   }
 }
 
