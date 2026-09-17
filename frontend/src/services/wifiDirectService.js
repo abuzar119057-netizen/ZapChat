@@ -74,6 +74,33 @@ class WifiDirectService {
     return await WifiDirect.sendFile(fileData);
   }
 
+  // ── MULTI-HOP MESH ROUTING METHODS ──
+
+  async getLocalDeviceId() {
+    if (!this.isNative) return { deviceId: 'browser_demo_id' };
+    return await WifiDirect.getLocalDeviceId();
+  }
+
+  async getMeshDiagnostics() {
+    if (!this.isNative) {
+      return {
+        deviceId: 'browser_demo_id',
+        connectedPeers: ['Peer_B', 'Peer_C'],
+        routeTable: [{ destinationId: 'Peer_C', nextHopId: 'Peer_B', hops: 2 }],
+        queuedMessagesCount: 0,
+        processedMessagesCount: 5
+      };
+    }
+    return await WifiDirect.getMeshDiagnostics();
+  }
+
+  async sendMeshMessage(meshData) {
+    if (!this.isNative) {
+      throw new Error('Multi-hop mesh routing requires native Android APK.');
+    }
+    return await WifiDirect.sendMeshMessage(meshData);
+  }
+
   // ── VOICE & VIDEO CALLING METHODS ──
 
   async startVoiceCall(callData) {
@@ -157,6 +184,11 @@ class WifiDirectService {
   onFileReceived(callback) {
     if (!this.isNative) return { remove: () => {} };
     return WifiDirect.addListener('onFileReceived', (data) => callback(data));
+  }
+
+  onMeshPacketRelayed(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onMeshPacketRelayed', (data) => callback(data));
   }
 
   onCallRequest(callback) {

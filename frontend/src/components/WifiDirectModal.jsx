@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Wifi, WifiOff, RefreshCw, Send, AlertCircle, ShieldAlert, CheckCircle2, Smartphone, X, Zap, Radio, Paperclip, Image as ImageIcon, Video as VideoIcon, FileText, Download, Phone, PhoneCall, PhoneOff, Mic, MicOff, Volume2, VolumeX, Camera, CameraOff, SwitchCamera, User } from 'lucide-react';
+import { Wifi, WifiOff, RefreshCw, Send, AlertCircle, ShieldAlert, CheckCircle2, Smartphone, X, Zap, Radio, Paperclip, Image as ImageIcon, Video as VideoIcon, FileText, Download, Phone, PhoneCall, PhoneOff, Mic, MicOff, Volume2, VolumeX, Camera, CameraOff, SwitchCamera, Network, GitCommit, Layers, Terminal, Activity } from 'lucide-react';
 import { wifiDirectService } from '../services/wifiDirectService';
 import { useAuth } from '../context/AuthContext';
 
 const WifiDirectModal = ({ isOpen, onClose }) => {
   const { user } = useAuth();
   
-  const [status, setStatus] = useState('Disconnected'); // 'Searching', 'Device Found', 'Connecting', 'Connected', 'Disconnected'
+  const [status, setStatus] = useState('Disconnected');
   const [discoveredDevices, setDiscoveredDevices] = useState([]);
   const [connectedDevice, setConnectedDevice] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -15,9 +15,20 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
   const [isScanning, setIsScanning] = useState(false);
   const [hasPermission, setHasPermission] = useState(true);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [showMeshDiagnostics, setShowMeshDiagnostics] = useState(false);
+
+  // Mesh Network Diagnostic States
+  const [localDeviceId, setLocalDeviceId] = useState('loading...');
+  const [meshDiagnostics, setMeshDiagnostics] = useState({
+    deviceId: '',
+    connectedPeers: [],
+    routeTable: [],
+    queuedMessagesCount: 0,
+    processedMessagesCount: 0
+  });
 
   // Real-time Voice & Video Call States
-  const [callState, setCallState] = useState('idle'); // 'idle', 'calling', 'incoming', 'connected', 'ended'
+  const [callState, setCallState] = useState('idle');
   const [isVideoCall, setIsVideoCall] = useState(false);
   const [activeCallId, setActiveCallId] = useState(null);
   const [callerName, setCallerName] = useState('ZapChat User');
@@ -34,6 +45,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
   const docInputRef = useRef(null);
   const chatEndRef = useRef(null);
   const timerRef = useRef(null);
+  const diagIntervalRef = useRef(null);
 
   const isNative = wifiDirectService.isNativeAvailable();
 
@@ -67,7 +79,20 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
           setStatus(res.status);
         }
       });
+
+      wifiDirectService.getLocalDeviceId().then(res => {
+        if (res && res.deviceId) {
+          setLocalDeviceId(res.deviceId);
+        }
+      });
     }
+
+    // Refresh Mesh Diagnostic data periodically
+    diagIntervalRef.current = setInterval(() => {
+      wifiDirectService.getMeshDiagnostics().then(diag => {
+        if (diag) setMeshDiagnostics(diag);
+      });
+    }, 2000);
 
     const peerSub = wifiDirectService.onPeersDiscovered((data) => {
       if (data && data.devices) {
@@ -103,7 +128,9 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
           senderId: msg.senderId || 'remote',
           timestamp: msg.timestamp || Date.now(),
           isMe: false,
-          msgType: 'TEXT'
+          msgType: 'TEXT',
+          hops: msg.hops || 1,
+          isMeshRelayed: !!msg.isMeshRelayed
         }];
       });
     });
@@ -151,8 +178,14 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       });
     });
 
-    // ── VOICE & VIDEO CALL EVENT LISTENERS ──
+    const meshRelaySub = wifiDirectService.onMeshPacketRelayed((relayData) => {
+      console.log('Mesh Packet Relayed:', relayData);
+      wifiDirectService.getMeshDiagnostics().then(diag => {
+        if (diag) setMeshDiagnostics(diag);
+      });
+    });
 
+    // Voice & Video Call Event Listeners
     const callReqSub = wifiDirectService.onCallRequest((data) => {
       setActiveCallId(data.callId);
       setCallerName(data.callerName || 'Nearby ZapChat User');
@@ -160,7 +193,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       setCallState('incoming');
     });
 
-    const callAccSub = wifiDirectService.onCallAccepted((data) => {
+    const callAccSub = wifiDirectService.onCallAccepted(() => {
       setCallState('connected');
       setCallDuration(0);
       clearInterval(timerRef.current);
@@ -184,21 +217,15 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     });
 
     const remoteVideoSub = wifiDirectService.onRemoteVideoFrame((data) => {
-      if (data && data.frameData) {
-        setRemoteVideoFrame(data.frameData);
-      }
+      if (data && data.frameData) setRemoteVideoFrame(data.frameData);
     });
 
     const localVideoSub = wifiDirectService.onLocalVideoFrame((data) => {
-      if (data && data.frameData) {
-        setLocalVideoFrame(data.frameData);
-      }
+      if (data && data.frameData) setLocalVideoFrame(data.frameData);
     });
 
     const errSub = wifiDirectService.onError((err) => {
-      if (err && err.message) {
-        setErrorMessage(err.message);
-      }
+      if (err && err.message) setErrorMessage(err.message);
     });
 
     return () => {
@@ -207,6 +234,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       if (msgSub && msgSub.remove) msgSub.remove();
       if (progressSub && progressSub.remove) progressSub.remove();
       if (fileReceivedSub && fileReceivedSub.remove) fileReceivedSub.remove();
+      if (meshRelaySub && meshRelaySub.remove) meshRelaySub.remove();
       if (callReqSub && callReqSub.remove) callReqSub.remove();
       if (callAccSub && callAccSub.remove) callAccSub.remove();
       if (callRejSub && callRejSub.remove) callRejSub.remove();
@@ -215,6 +243,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       if (localVideoSub && localVideoSub.remove) localVideoSub.remove();
       if (errSub && errSub.remove) errSub.remove();
       clearInterval(timerRef.current);
+      clearInterval(diagIntervalRef.current);
     };
   }, [isOpen, isNative]);
 
@@ -289,26 +318,26 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     if (!text || !text.trim()) return;
 
     setErrorMessage('');
-    const msgId = `p2p_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const msgId = `mesh_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
     const newMsg = {
       messageId: msgId,
       text: text.trim(),
       senderName: user?.name || user?.username || 'ZapChat User',
-      senderId: user?._id || 'local_user',
+      senderId: localDeviceId,
       timestamp: Date.now(),
       isMe: true,
-      msgType: 'TEXT'
+      msgType: 'TEXT',
+      hops: 1
     };
 
     setMessages(prev => [...prev, newMsg]);
     if (!textToSend) setInputText('');
 
     try {
-      await wifiDirectService.sendMessage({
+      await wifiDirectService.sendMeshMessage({
         text: newMsg.text,
-        messageId: newMsg.messageId,
-        senderName: newMsg.senderName,
-        senderId: newMsg.senderId
+        destinationId: 'broadcast',
+        senderName: newMsg.senderName
       });
     } catch (e) {
       setErrorMessage(`Failed to send message: ${e.message}`);
@@ -362,8 +391,6 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     }
   };
 
-  // ── VOICE & VIDEO CALLING CONTROLS ──
-
   const handleStartVoiceCall = async () => {
     setErrorMessage('');
     try {
@@ -372,14 +399,12 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       setCallerName(connectedDevice?.deviceName || 'Nearby ZapChat User');
       const res = await wifiDirectService.startVoiceCall({
         callerName: user?.name || user?.username || 'ZapChat User',
-        callerId: user?._id || 'local_user'
+        callerId: localDeviceId
       });
-      if (res && res.callId) {
-        setActiveCallId(res.callId);
-      }
+      if (res && res.callId) setActiveCallId(res.callId);
     } catch (e) {
       setCallState('idle');
-      setErrorMessage(e.message || 'Failed to initiate Wi-Fi Direct voice call.');
+      setErrorMessage(e.message || 'Failed to initiate voice call.');
     }
   };
 
@@ -391,14 +416,12 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       setCallerName(connectedDevice?.deviceName || 'Nearby ZapChat User');
       const res = await wifiDirectService.startVideoCall({
         callerName: user?.name || user?.username || 'ZapChat User',
-        callerId: user?._id || 'local_user'
+        callerId: localDeviceId
       });
-      if (res && res.callId) {
-        setActiveCallId(res.callId);
-      }
+      if (res && res.callId) setActiveCallId(res.callId);
     } catch (e) {
       setCallState('idle');
-      setErrorMessage(e.message || 'Failed to initiate Wi-Fi Direct video call.');
+      setErrorMessage(e.message || 'Failed to initiate video call.');
     }
   };
 
@@ -407,9 +430,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       setCallState('connected');
       setCallDuration(0);
       clearInterval(timerRef.current);
-      timerRef.current = setInterval(() => {
-        setCallDuration(prev => prev + 1);
-      }, 1000);
+      timerRef.current = setInterval(() => setCallDuration(prev => prev + 1), 1000);
       await wifiDirectService.acceptVoiceCall({ callId: activeCallId });
     } catch (e) {
       setCallState('idle');
@@ -440,22 +461,17 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     }
   };
 
-  const handleSwitchCamera = async () => {
-    await wifiDirectService.switchCamera();
-  };
-
+  const handleSwitchCamera = async () => await wifiDirectService.switchCamera();
   const handleToggleCamera = async () => {
     const newEnabled = !isCameraEnabled;
     setIsCameraEnabled(newEnabled);
     await wifiDirectService.setCameraEnabled(newEnabled);
   };
-
   const handleToggleMute = async () => {
     const newMuted = !isMuted;
     setIsMuted(newMuted);
     await wifiDirectService.setMute(newMuted);
   };
-
   const handleToggleSpeaker = async () => {
     const newSpeaker = !isSpeakerOn;
     setIsSpeakerOn(newSpeaker);
@@ -485,7 +501,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       case 'Connected':
         return (
           <span className="flex text-[#00e676] bg-[#00e676]/15 border border-[#00e676]/30 px-3 py-1 rounded-full text-xs font-bold items-center gap-1.5 shadow-[0_0_12px_rgba(0,230,118,0.2)]">
-            <CheckCircle2 className="w-3.5 h-3.5" /> Connected (Offline P2P)
+            <CheckCircle2 className="w-3.5 h-3.5" /> Connected (Multi-Hop Mesh ON)
           </span>
         );
       default:
@@ -515,39 +531,35 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
         <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between bg-[#111b21]">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white shadow-lg">
-              <Zap className="w-5 h-5 fill-current" />
+              <Network className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-bold text-gray-100 flex items-center gap-2">
-                Offline P2P Video & Voice
+                Offline P2P Mesh (A → B → C)
               </h2>
-              <p className="text-xs text-emerald-400 font-medium">Wi-Fi Direct • No Internet / Cloud Needed</p>
+              <p className="text-xs text-emerald-400 font-medium">Multi-Hop Relay • No Internet Needed</p>
             </div>
           </div>
           
           <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setShowMeshDiagnostics(!showMeshDiagnostics)}
+              className={`p-2 rounded-full transition-all ${showMeshDiagnostics ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+              title="Developer Mesh Diagnostics & Route Table"
+            >
+              <Terminal className="w-4 h-4" />
+            </button>
             {status === 'Connected' && callState === 'idle' && (
               <>
-                <button
-                  onClick={handleStartVoiceCall}
-                  className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-full transition-all shadow"
-                  title="Voice Call"
-                >
+                <button onClick={handleStartVoiceCall} className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-full shadow" title="Voice Call">
                   <Phone className="w-4 h-4" />
                 </button>
-                <button
-                  onClick={handleStartVideoCall}
-                  className="p-2 bg-teal-600 hover:bg-teal-500 text-white rounded-full transition-all shadow-[0_0_12px_rgba(20,184,166,0.4)]"
-                  title="Video Call"
-                >
+                <button onClick={handleStartVideoCall} className="p-2 bg-teal-600 hover:bg-teal-500 text-white rounded-full shadow" title="Video Call">
                   <VideoIcon className="w-4 h-4" />
                 </button>
               </>
             )}
-            <button 
-              onClick={onClose}
-              className="w-8 h-8 rounded-full bg-gray-800 hover:bg-gray-700 flex items-center justify-center text-gray-300 transition-colors"
-            >
+            <button onClick={onClose} className="w-8 h-8 rounded-full bg-gray-800 hover:bg-gray-700 flex items-center justify-center text-gray-300">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -560,10 +572,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
             {getStatusBadge()}
           </div>
           {status === 'Connected' && (
-            <button
-              onClick={handleDisconnect}
-              className="text-xs text-red-400 hover:text-red-300 font-semibold underline transition-colors"
-            >
+            <button onClick={handleDisconnect} className="text-xs text-red-400 hover:text-red-300 font-semibold underline">
               Disconnect
             </button>
           )}
@@ -576,8 +585,55 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
             <div>
               <p className="font-semibold text-amber-200">Web Browser Mode</p>
               <p className="mt-0.5 text-amber-300/90">
-                Wi-Fi Direct real-time 1-to-1 Video Calling requires native Android APK running on two physical Android phones.
+                Multi-Hop Mesh Routing (A → B → C) requires native Android APK running on 3 physical Android phones.
               </p>
+            </div>
+          </div>
+        )}
+
+        {/* DEVELOPER MESH DIAGNOSTIC OVERLAY PANEL */}
+        {showMeshDiagnostics && (
+          <div className="mx-4 mt-3 p-4 bg-[#0b141a] border border-emerald-500/40 rounded-2xl text-xs font-mono flex flex-col gap-2.5 shadow-2xl animate-in fade-in duration-200">
+            <div className="flex items-center justify-between border-b border-gray-800 pb-2">
+              <span className="font-bold text-emerald-400 flex items-center gap-1.5">
+                <Terminal className="w-4 h-4" /> Mesh Developer Diagnostics
+              </span>
+              <button onClick={() => setShowMeshDiagnostics(false)} className="text-gray-400 hover:text-gray-200">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
+              <span>Local Device ID:</span>
+              <span className="text-emerald-300 font-bold bg-emerald-950 px-2 py-0.5 rounded border border-emerald-500/30">{localDeviceId}</span>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
+              <span>Connected Direct Peers:</span>
+              <span className="text-cyan-400">{meshDiagnostics.connectedPeers?.length || 0} Connected</span>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
+              <span>Store-and-Forward Queue:</span>
+              <span className="text-amber-400">{meshDiagnostics.queuedMessagesCount || 0} Queued</span>
+            </div>
+
+            {/* Route Table View */}
+            <div className="mt-1">
+              <span className="text-gray-400 block mb-1 font-sans text-[11px] font-semibold">Active Route Table:</span>
+              {meshDiagnostics.routeTable && meshDiagnostics.routeTable.length > 0 ? (
+                <div className="space-y-1">
+                  {meshDiagnostics.routeTable.map((rt, idx) => (
+                    <div key={idx} className="bg-gray-900 p-2 rounded border border-gray-800 flex items-center justify-between text-[11px]">
+                      <span className="text-gray-200">Dest: {rt.destinationId}</span>
+                      <span className="text-emerald-400">Next: {rt.nextHopId}</span>
+                      <span className="text-cyan-300 font-bold">Hops: {rt.hops}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-gray-500 text-[11px] italic">No active multi-hop routes cached yet.</p>
+              )}
             </div>
           </div>
         )}
@@ -601,46 +657,30 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
             <Wifi className="w-8 h-8 text-emerald-400 animate-bounce" />
             <h3 className="text-sm font-bold text-emerald-200">Android Permissions Required</h3>
             <p className="text-xs text-gray-300 max-w-xs">
-              Camera, Microphone, Nearby Devices & Location permissions are required to make real-time Wi-Fi Direct video calls offline.
+              Microphone, Camera, Nearby Devices & Location permissions are required to make real-time Wi-Fi Direct calls and relay mesh packets.
             </p>
-            <button
-              onClick={handleRequestPermission}
-              className="mt-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl shadow-md transition-colors"
-            >
+            <button onClick={handleRequestPermission} className="mt-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl shadow-md">
               Grant Permissions
             </button>
           </div>
         )}
 
-        {/* ── VOICE & VIDEO CALL OVERLAY SCREEN ── */}
+        {/* VOICE & VIDEO CALL OVERLAY SCREEN */}
         {callState !== 'idle' && (
           <div className="absolute inset-0 z-40 bg-[#0b141a] flex flex-col items-center justify-between p-6 text-white animate-in fade-in zoom-in-95 duration-200">
-            
-            {/* VIDEO CANVAS / PREVIEW DISPLAY (FOR VIDEO CALLS) */}
             {isVideoCall && callState === 'connected' ? (
               <div className="relative w-full flex-1 rounded-2xl overflow-hidden bg-black border border-gray-800 shadow-2xl flex items-center justify-center">
-                {/* Remote Video Stream (Main View) */}
                 {remoteVideoFrame ? (
-                  <img
-                    src={remoteVideoFrame}
-                    alt="Remote Video"
-                    className="w-full h-full object-cover"
-                  />
+                  <img src={remoteVideoFrame} alt="Remote Video" className="w-full h-full object-cover" />
                 ) : (
                   <div className="flex flex-col items-center gap-2 text-gray-500">
                     <VideoIcon className="w-12 h-12 animate-pulse" />
                     <span className="text-xs">Receiving P2P Video Stream...</span>
                   </div>
                 )}
-
-                {/* Local Camera Preview (Picture-in-Picture) */}
                 <div className="absolute bottom-4 right-4 w-28 h-36 bg-gray-900 border-2 border-emerald-500/60 rounded-xl overflow-hidden shadow-2xl">
                   {localVideoFrame && isCameraEnabled ? (
-                    <img
-                      src={localVideoFrame}
-                      alt="Local Video"
-                      className="w-full h-full object-cover"
-                    />
+                    <img src={localVideoFrame} alt="Local Video" className="w-full h-full object-cover" />
                   ) : (
                     <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 bg-gray-900 text-[10px]">
                       <CameraOff className="w-5 h-5 mb-1" />
@@ -648,8 +688,6 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                     </div>
                   )}
                 </div>
-
-                {/* Call Overlay Info Badge */}
                 <div className="absolute top-4 left-4 bg-black/60 backdrop-blur-md border border-white/10 px-3 py-1.5 rounded-full flex items-center gap-2 text-xs">
                   <span className="w-2 h-2 rounded-full bg-[#00e676] animate-ping" />
                   <span className="font-semibold text-emerald-300">{callerName}</span>
@@ -657,7 +695,6 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                 </div>
               </div>
             ) : (
-              /* VOICE CALL / CALLING / INCOMING AVATAR HEADER */
               <div className="flex flex-col items-center gap-4 mt-8">
                 <div className="relative">
                   <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white text-3xl font-bold shadow-2xl ring-4 ring-emerald-500/30">
@@ -674,31 +711,21 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                   <h3 className="text-xl font-bold text-gray-100">{callerName}</h3>
                   <p className="text-xs text-emerald-400 font-semibold mt-1">
                     {callState === 'calling' && (isVideoCall ? 'Calling Video P2P...' : 'Calling Voice P2P...')}
-                    {callState === 'incoming' && (isVideoCall ? 'Incoming Offline Video Call...' : 'Incoming Offline Voice Call...')}
+                    {callState === 'incoming' && (isVideoCall ? 'Incoming Video Call...' : 'Incoming Voice Call...')}
                     {callState === 'connected' && `Connected (${formatCallDuration(callDuration)})`}
                     {callState === 'ended' && 'Call Ended'}
                   </p>
-                  <p className="text-[10px] text-gray-500 mt-1">Wi-Fi Direct Real-Time Hardware Stream</p>
                 </div>
               </div>
             )}
 
-            {/* CALL CONTROLS BAR */}
             <div className="w-full flex items-center justify-center gap-4 my-4">
               {callState === 'incoming' ? (
                 <>
-                  <button
-                    onClick={handleRejectCall}
-                    className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-500 flex items-center justify-center text-white shadow-lg transition-transform active:scale-95"
-                    title="Decline Call"
-                  >
+                  <button onClick={handleRejectCall} className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-500 flex items-center justify-center text-white shadow-lg">
                     <PhoneOff className="w-7 h-7" />
                   </button>
-                  <button
-                    onClick={handleAcceptCall}
-                    className="w-16 h-16 rounded-full bg-emerald-600 hover:bg-emerald-500 flex items-center justify-center text-white shadow-[0_0_25px_rgba(16,185,129,0.5)] transition-transform active:scale-95 animate-pulse"
-                    title="Accept Call"
-                  >
+                  <button onClick={handleAcceptCall} className="w-16 h-16 rounded-full bg-emerald-600 hover:bg-emerald-500 flex items-center justify-center text-white shadow-lg animate-pulse">
                     {isVideoCall ? <VideoIcon className="w-7 h-7" /> : <PhoneCall className="w-7 h-7" />}
                   </button>
                 </>
@@ -706,60 +733,25 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                 <>
                   {callState === 'connected' && (
                     <>
-                      {/* Switch Front/Back Camera */}
                       {isVideoCall && (
-                        <button
-                          onClick={handleSwitchCamera}
-                          className="w-12 h-12 rounded-full bg-gray-800 hover:bg-gray-700 text-gray-200 flex items-center justify-center transition-all"
-                          title="Switch Camera"
-                        >
+                        <button onClick={handleSwitchCamera} className="w-12 h-12 rounded-full bg-gray-800 text-gray-200 flex items-center justify-center">
                           <SwitchCamera className="w-5 h-5" />
                         </button>
                       )}
-
-                      {/* Camera ON/OFF */}
                       {isVideoCall && (
-                        <button
-                          onClick={handleToggleCamera}
-                          className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
-                            !isCameraEnabled ? 'bg-red-500/20 border border-red-500 text-red-400' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
-                          }`}
-                          title={isCameraEnabled ? 'Turn Off Camera' : 'Turn On Camera'}
-                        >
+                        <button onClick={handleToggleCamera} className={`w-12 h-12 rounded-full flex items-center justify-center ${!isCameraEnabled ? 'bg-red-500/20 text-red-400' : 'bg-gray-800 text-gray-200'}`}>
                           {!isCameraEnabled ? <CameraOff className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
                         </button>
                       )}
-
-                      {/* Mute Mic */}
-                      <button
-                        onClick={handleToggleMute}
-                        className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
-                          isMuted ? 'bg-red-500/20 border border-red-500 text-red-400' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
-                        }`}
-                        title={isMuted ? 'Unmute Mic' : 'Mute Mic'}
-                      >
+                      <button onClick={handleToggleMute} className={`w-12 h-12 rounded-full flex items-center justify-center ${isMuted ? 'bg-red-500/20 text-red-400' : 'bg-gray-800 text-gray-200'}`}>
                         {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
                       </button>
-
-                      {/* Speaker ON/OFF */}
-                      <button
-                        onClick={handleToggleSpeaker}
-                        className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
-                          isSpeakerOn ? 'bg-emerald-500/20 border border-emerald-500 text-emerald-400' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
-                        }`}
-                        title={isSpeakerOn ? 'Speaker Off' : 'Speaker On'}
-                      >
+                      <button onClick={handleToggleSpeaker} className={`w-12 h-12 rounded-full flex items-center justify-center ${isSpeakerOn ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-800 text-gray-200'}`}>
                         {isSpeakerOn ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
                       </button>
                     </>
                   )}
-
-                  {/* End Call Button */}
-                  <button
-                    onClick={handleEndCall}
-                    className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-500 flex items-center justify-center text-white shadow-xl transition-transform active:scale-95"
-                    title="End Call"
-                  >
+                  <button onClick={handleEndCall} className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-500 flex items-center justify-center text-white shadow-xl">
                     <PhoneOff className="w-6 h-6" />
                   </button>
                 </>
@@ -779,20 +771,14 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                   <h3 className="text-sm font-bold text-gray-100 flex items-center gap-2">
                     <Radio className="w-4 h-4 text-emerald-400" /> Discover Nearby Devices
                   </h3>
-                  <p className="text-xs text-gray-400">Ensure Wi-Fi is enabled on both phones</p>
+                  <p className="text-xs text-gray-400">Ensure Wi-Fi is enabled on all phones</p>
                 </div>
                 {isScanning ? (
-                  <button
-                    onClick={handleStopScan}
-                    className="px-3 py-1.5 bg-red-600/80 hover:bg-red-600 text-white font-semibold text-xs rounded-xl transition-all shadow"
-                  >
+                  <button onClick={handleStopScan} className="px-3 py-1.5 bg-red-600/80 hover:bg-red-600 text-white font-semibold text-xs rounded-xl shadow">
                     Stop Scan
                   </button>
                 ) : (
-                  <button
-                    onClick={handleStartScan}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl flex items-center gap-1.5 transition-all shadow-[0_0_15px_rgba(16,185,129,0.3)]"
-                  >
+                  <button onClick={handleStartScan} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl flex items-center gap-1.5 shadow">
                     <RefreshCw className="w-3.5 h-3.5" /> Start Scan
                   </button>
                 )}
@@ -808,16 +794,13 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                     <Smartphone className="w-12 h-12 text-gray-600 mb-2 stroke-[1.5]" />
                     <p className="text-sm font-semibold text-gray-300">No ZapChat devices found nearby</p>
                     <p className="text-xs text-gray-500 mt-1 max-w-xs">
-                      Tap "Start Scan" above. On Phone B, open this Offline Chat screen as well.
+                      Tap "Start Scan" above. On Phone B & C, open this Offline Mesh Chat screen as well.
                     </p>
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2.5">
                     {discoveredDevices.map((dev, idx) => (
-                      <div
-                        key={dev.deviceAddress || idx}
-                        className="flex items-center justify-between p-3.5 bg-[#1f2c34] hover:bg-[#202c33] border border-gray-800 rounded-2xl transition-all"
-                      >
+                      <div key={dev.deviceAddress || idx} className="flex items-center justify-between p-3.5 bg-[#1f2c34] hover:bg-[#202c33] border border-gray-800 rounded-2xl">
                         <div className="flex items-center gap-3">
                           <div className="w-10 h-10 rounded-xl bg-emerald-950/60 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
                             <Smartphone className="w-5 h-5" />
@@ -829,11 +812,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                           </div>
                         </div>
 
-                        <button
-                          onClick={() => handleConnect(dev)}
-                          disabled={status === 'Connecting'}
-                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs rounded-xl transition-all shadow"
-                        >
+                        <button onClick={() => handleConnect(dev)} disabled={status === 'Connecting'} className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow">
                           {status === 'Connecting' && connectedDevice?.deviceAddress === dev.deviceAddress ? 'Connecting...' : 'Connect'}
                         </button>
                       </div>
@@ -850,19 +829,13 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
               <div className="bg-emerald-950/30 border border-emerald-500/30 px-3 py-2 rounded-xl flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2 text-emerald-300 font-medium">
                   <Wifi className="w-4 h-4 text-[#00e676]" />
-                  <span>Wi-Fi Direct Active</span>
+                  <span>Mesh Active (A → B → C)</span>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={handleStartVoiceCall}
-                    className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-2 py-1 rounded-lg font-semibold text-[11px] shadow transition-colors"
-                  >
+                  <button onClick={handleStartVoiceCall} className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-2 py-1 rounded-lg font-semibold text-[11px] shadow">
                     <Phone className="w-3 h-3" /> Voice
                   </button>
-                  <button
-                    onClick={handleStartVideoCall}
-                    className="flex items-center gap-1 bg-teal-600 hover:bg-teal-500 text-white px-2 py-1 rounded-lg font-semibold text-[11px] shadow transition-colors"
-                  >
+                  <button onClick={handleStartVideoCall} className="flex items-center gap-1 bg-teal-600 hover:bg-teal-500 text-white px-2 py-1 rounded-lg font-semibold text-[11px] shadow">
                     <VideoIcon className="w-3 h-3" /> Video
                   </button>
                 </div>
@@ -873,28 +846,24 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                 {messages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center p-6 text-gray-500">
                     <Zap className="w-10 h-10 text-emerald-500/50 mb-2" />
-                    <p className="text-sm font-semibold text-gray-300">P2P Channel Connected!</p>
+                    <p className="text-sm font-semibold text-gray-300">Multi-Hop Mesh Active!</p>
                     <p className="text-xs text-gray-400 mt-1 max-w-xs">
-                      Send text, files, or tap **Voice / Video** buttons above to start a real-time offline call!
+                      Send messages, files, or start calls. If Phone C is not directly connected to Phone A, Phone B will relay packets automatically!
                     </p>
                   </div>
                 ) : (
                   messages.map((msg, i) => (
-                    <div
-                      key={msg.messageId || i}
-                      className={`flex flex-col ${msg.isMe ? 'items-end' : 'items-start'}`}
-                    >
-                      <div
-                        className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm shadow-md ${
-                          msg.isMe
-                            ? 'bg-emerald-700 text-white rounded-br-none'
-                            : 'bg-[#202c33] text-gray-100 rounded-bl-none border border-gray-700/60'
-                        }`}
-                      >
+                    <div key={msg.messageId || i} className={`flex flex-col ${msg.isMe ? 'items-end' : 'items-start'}`}>
+                      <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm shadow-md ${msg.isMe ? 'bg-emerald-700 text-white rounded-br-none' : 'bg-[#202c33] text-gray-100 rounded-bl-none border border-gray-700/60'}`}>
                         {!msg.isMe && (
-                          <span className="block text-[11px] font-semibold text-emerald-400 mb-1">
-                            {msg.senderName}
-                          </span>
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <span className="text-[11px] font-semibold text-emerald-400">{msg.senderName}</span>
+                            {msg.isMeshRelayed && (
+                              <span className="text-[9px] bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-500/30 font-mono">
+                                Relayed ({msg.hops} Hops: A→B→C)
+                              </span>
+                            )}
+                          </div>
                         )}
 
                         {/* RENDER TEXT MESSAGE */}
@@ -906,11 +875,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                         {msg.msgType === 'IMAGE' && (
                           <div className="flex flex-col gap-1.5">
                             {msg.fileUrl ? (
-                              <img 
-                                src={msg.fileUrl} 
-                                alt={msg.filename} 
-                                className="max-h-56 max-w-full rounded-xl object-cover border border-black/20"
-                              />
+                              <img src={msg.fileUrl} alt={msg.filename} className="max-h-56 max-w-full rounded-xl object-cover border border-black/20" />
                             ) : (
                               <div className="w-48 h-32 bg-gray-800 rounded-xl flex items-center justify-center text-gray-400">
                                 <ImageIcon className="w-8 h-8" />
@@ -927,11 +892,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                         {msg.msgType === 'VIDEO' && (
                           <div className="flex flex-col gap-1.5">
                             {msg.fileUrl ? (
-                              <video 
-                                src={msg.fileUrl} 
-                                controls 
-                                className="max-h-56 max-w-full rounded-xl object-cover border border-black/20"
-                              />
+                              <video src={msg.fileUrl} controls className="max-h-56 max-w-full rounded-xl object-cover border border-black/20" />
                             ) : (
                               <div className="w-48 h-32 bg-gray-800 rounded-xl flex items-center justify-center text-gray-400">
                                 <VideoIcon className="w-8 h-8" />
@@ -955,13 +916,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                               <p className="text-[10px] opacity-80">{formatBytes(msg.fileSize)}</p>
                             </div>
                             {msg.filePath && (
-                              <a
-                                href={msg.fileUrl}
-                                download={msg.filename}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="w-8 h-8 rounded-full bg-emerald-600 hover:bg-emerald-500 flex items-center justify-center text-white shrink-0 shadow"
-                              >
+                              <a href={msg.fileUrl} download={msg.filename} target="_blank" rel="noreferrer" className="w-8 h-8 rounded-full bg-emerald-600 hover:bg-emerald-500 flex items-center justify-center text-white shrink-0 shadow">
                                 <Download className="w-4 h-4" />
                               </a>
                             )}
@@ -972,24 +927,19 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                         {(msg.isUploading || msg.isDownloading || (msg.percent !== undefined && msg.percent < 100)) && (
                           <div className="mt-2 w-full bg-black/30 p-2 rounded-xl border border-white/10">
                             <div className="flex items-center justify-between text-[10px] mb-1 text-gray-200">
-                              <span>{msg.isUploading ? 'Uploading P2P...' : 'Downloading P2P...'}</span>
+                              <span>{msg.isUploading ? 'Uploading P2P Mesh...' : 'Downloading P2P Mesh...'}</span>
                               <span>{msg.percent || 0}% ({msg.speed || '0 KB/s'})</span>
                             </div>
                             <div className="w-full bg-gray-700 h-1.5 rounded-full overflow-hidden">
-                              <div
-                                className="bg-emerald-400 h-full transition-all duration-200"
-                                style={{ width: `${msg.percent || 0}%` }}
-                              />
+                              <div className="bg-emerald-400 h-full transition-all duration-200" style={{ width: `${msg.percent || 0}%` }} />
                             </div>
                           </div>
                         )}
 
                         {/* TIMESTAMP & BADGE */}
                         <div className="mt-1 flex items-center justify-end gap-1 text-[10px] opacity-75">
-                          <span>
-                            {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                          <span className="bg-black/30 px-1 rounded text-[9px] font-mono">Offline P2P</span>
+                          <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          <span className="bg-black/30 px-1 rounded text-[9px] font-mono">Offline Mesh</span>
                         </div>
                       </div>
                     </div>
@@ -1001,28 +951,19 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
               {/* Attachment Popover Menu */}
               {showAttachMenu && (
                 <div className="absolute bottom-16 left-4 bg-[#1f2c34] border border-gray-700/80 rounded-2xl p-2 shadow-2xl flex flex-col gap-1 z-30 animate-in fade-in slide-in-from-bottom-3 duration-200">
-                  <button
-                    onClick={() => imageInputRef.current?.click()}
-                    className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-emerald-950/50 text-gray-100 text-xs font-semibold rounded-xl transition-colors"
-                  >
+                  <button onClick={() => imageInputRef.current?.click()} className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-emerald-950/50 text-gray-100 text-xs font-semibold rounded-xl transition-colors">
                     <div className="w-7 h-7 rounded-lg bg-emerald-600/30 text-emerald-400 flex items-center justify-center">
                       <ImageIcon className="w-4 h-4" />
                     </div>
                     <span>📷 Send Image</span>
                   </button>
-                  <button
-                    onClick={() => videoInputRef.current?.click()}
-                    className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-teal-950/50 text-gray-100 text-xs font-semibold rounded-xl transition-colors"
-                  >
+                  <button onClick={() => videoInputRef.current?.click()} className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-teal-950/50 text-gray-100 text-xs font-semibold rounded-xl transition-colors">
                     <div className="w-7 h-7 rounded-lg bg-teal-600/30 text-teal-400 flex items-center justify-center">
                       <VideoIcon className="w-4 h-4" />
                     </div>
                     <span>🎥 Send Video</span>
                   </button>
-                  <button
-                    onClick={() => docInputRef.current?.click()}
-                    className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-cyan-950/50 text-gray-100 text-xs font-semibold rounded-xl transition-colors"
-                  >
+                  <button onClick={() => docInputRef.current?.click()} className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-cyan-950/50 text-gray-100 text-xs font-semibold rounded-xl transition-colors">
                     <div className="w-7 h-7 rounded-lg bg-cyan-600/30 text-cyan-400 flex items-center justify-center">
                       <FileText className="w-4 h-4" />
                     </div>
@@ -1032,36 +973,13 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
               )}
 
               {/* Message Input Form */}
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleSendMessage();
-                }}
-                className="flex items-center gap-2 bg-[#1f2c34] p-2 rounded-2xl border border-gray-800"
-              >
-                <button
-                  type="button"
-                  onClick={() => setShowAttachMenu(!showAttachMenu)}
-                  className={`w-10 h-10 rounded-xl flex items-center justify-center transition-colors shrink-0 ${
-                    showAttachMenu ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-emerald-400 hover:bg-gray-800'
-                  }`}
-                  title="Attach file"
-                >
+              <form onSubmit={(e) => { e.preventDefault(); handleSendMessage(); }} className="flex items-center gap-2 bg-[#1f2c34] p-2 rounded-2xl border border-gray-800">
+                <button type="button" onClick={() => setShowAttachMenu(!showAttachMenu)} className={`w-10 h-10 rounded-xl flex items-center justify-center transition-colors shrink-0 ${showAttachMenu ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-emerald-400 hover:bg-gray-800'}`} title="Attach file">
                   <Paperclip className="w-4 h-4" />
                 </button>
 
-                <input
-                  type="text"
-                  placeholder="Type offline message..."
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  className="flex-1 bg-transparent border-none outline-none text-sm text-gray-100 placeholder-gray-500 px-2"
-                />
-                <button
-                  type="submit"
-                  disabled={!inputText.trim()}
-                  className="w-10 h-10 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-xl flex items-center justify-center transition-all shadow-md shrink-0"
-                >
+                <input type="text" placeholder="Type multi-hop mesh message..." value={inputText} onChange={(e) => setInputText(e.target.value)} className="flex-1 bg-transparent border-none outline-none text-sm text-gray-100 placeholder-gray-500 px-2" />
+                <button type="submit" disabled={!inputText.trim()} className="w-10 h-10 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-xl flex items-center justify-center transition-all shadow-md shrink-0">
                   <Send className="w-4 h-4" />
                 </button>
               </form>

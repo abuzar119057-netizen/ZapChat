@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
@@ -63,6 +64,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 @CapacitorPlugin(
@@ -79,17 +81,11 @@ public class WifiDirectPlugin extends Plugin {
     private static final int P2P_PORT = 8888;
     private static final int AUDIO_PORT = 8889;
     private static final int VIDEO_PORT = 8890;
-    private static final int CHUNK_SIZE = 32768; // 32 KB streaming chunks for files
+    private static final int CHUNK_SIZE = 32768; // 32 KB streaming chunks
+    private static final int DEFAULT_TTL = 5;
 
-    // Audio Parameters
-    private static final int SAMPLE_RATE = 16000;
-    private static final int CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO;
-    private static final int CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO;
-    private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
-
-    // Video Parameters
-    private static final int FRAME_WIDTH = 320;
-    private static final int FRAME_HEIGHT = 240;
+    // Device Identification
+    private String localDeviceId;
 
     private WifiP2pManager manager;
     private WifiP2pManager.Channel channel;
@@ -108,7 +104,7 @@ public class WifiDirectPlugin extends Plugin {
     private Thread clientThread;
     private Thread readerThread;
 
-    // Real-time Voice Calling & Video Calling State
+    // Real-time Voice & Video Calling State
     private volatile boolean isCallActive = false;
     private volatile boolean isVideoCall = false;
     private volatile boolean isMuted = false;
@@ -124,16 +120,39 @@ public class WifiDirectPlugin extends Plugin {
     private DatagramSocket audioSendSocket;
     private DatagramSocket audioReceiveSocket;
 
-    // Video Calling Engine Variables
     private Camera cameraInstance;
     private SurfaceTexture dummySurfaceTexture;
-    private Thread videoSendThread;
-    private Thread videoReceiveThread;
     private DatagramSocket videoSendSocket;
     private DatagramSocket videoReceiveSocket;
+    private Thread videoReceiveThread;
 
+    // ── MULTI-HOP MESH ROUTING ENGINE DATA STRUCTURES ──
     private final Set<String> processedMessageIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Map<String, FileTransferSession> activeReceivingTransfers = new ConcurrentHashMap<>();
+
+    // Connected Peer Sockets
+    private final Map<String, Socket> connectedPeersSockets = new ConcurrentHashMap<>();
+    private final Map<String, PrintWriter> connectedPeersWriters = new ConcurrentHashMap<>();
+
+    // Route Table: destinationDeviceId -> RouteEntry
+    private final Map<String, RouteEntry> routeTable = new ConcurrentHashMap<>();
+
+    // Store & Forward Message Queue: queued packets when next hop/destination is offline
+    private final List<JSObject> offlineMeshQueue = Collections.synchronizedList(new ArrayList<>());
+
+    public static class RouteEntry {
+        public String destinationId;
+        public String nextHopId;
+        public int hops;
+        public long lastActive;
+
+        public RouteEntry(String destinationId, String nextHopId, int hops) {
+            this.destinationId = destinationId;
+            this.nextHopId = nextHopId;
+            this.hops = hops;
+            this.lastActive = System.currentTimeMillis();
+        }
+    }
 
     private static class FileTransferSession {
         String transferId;
@@ -162,11 +181,18 @@ public class WifiDirectPlugin extends Plugin {
         super.load();
         Context context = getContext();
 
+        // Initialize or restore unique local device ID
+        SharedPreferences prefs = context.getSharedPreferences("ZapChatMeshPrefs", Context.MODE_PRIVATE);
+        localDeviceId = prefs.getString("localDeviceId", null);
+        if (localDeviceId == null) {
+            localDeviceId = "zap_" + UUID.randomUUID().toString().substring(0, 8);
+            prefs.edit().putString("localDeviceId", localDeviceId).apply();
+        }
+        Log.d(TAG, "Local Mesh Device ID: " + localDeviceId);
+
         manager = (WifiP2pManager) context.getSystemService(Context.WIFI_P2P_SERVICE);
         if (manager != null) {
             channel = manager.initialize(context, Looper.getMainLooper(), null);
-        } else {
-            Log.e(TAG, "WifiP2pManager is null! Wi-Fi Direct not supported on this device.");
         }
 
         intentFilter = new IntentFilter();
@@ -276,6 +302,216 @@ public class WifiDirectPlugin extends Plugin {
             }
         }
     };
+
+    @PluginMethod
+    public void getLocalDeviceId(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("deviceId", localDeviceId);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void getMeshDiagnostics(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("deviceId", localDeviceId);
+
+        JSArray peersArr = new JSArray();
+        for (String peerId : connectedPeersSockets.keySet()) {
+            peersArr.put(peerId);
+        }
+        ret.put("connectedPeers", peersArr);
+
+        JSArray routesArr = new JSArray();
+        for (RouteEntry re : routeTable.values()) {
+            JSObject rObj = new JSObject();
+            rObj.put("destinationId", re.destinationId);
+            rObj.put("nextHopId", re.nextHopId);
+            rObj.put("hops", re.hops);
+            rObj.put("lastActive", re.lastActive);
+            routesArr.put(rObj);
+        }
+        ret.put("routeTable", routesArr);
+        ret.put("queuedMessagesCount", offlineMeshQueue.size());
+        ret.put("processedMessagesCount", processedMessageIds.size());
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void sendMeshMessage(PluginCall call) {
+        String text = call.getString("text");
+        String destinationId = call.getString("destinationId");
+        String senderName = call.getString("senderName", "ZapChat User");
+
+        if (text == null || text.trim().isEmpty()) {
+            call.reject("Message text cannot be empty.");
+            return;
+        }
+
+        String msgId = "mesh_" + System.currentTimeMillis() + "_" + (int)(Math.random() * 10000);
+
+        JSObject packet = new JSObject();
+        packet.put("type", "MESH_PACKET");
+        packet.put("messageId", msgId);
+        packet.put("senderId", localDeviceId);
+        packet.put("senderName", senderName);
+        packet.put("destinationId", destinationId != null ? destinationId : "broadcast");
+        packet.put("ttl", DEFAULT_TTL);
+        packet.put("hops", 1);
+        packet.put("msgType", "TEXT");
+
+        JSObject payload = new JSObject();
+        payload.put("text", text);
+        payload.put("timestamp", System.currentTimeMillis());
+        packet.put("payload", payload);
+
+        routeAndSendMeshPacket(packet);
+
+        JSObject ret = new JSObject();
+        ret.put("success", true);
+        ret.put("messageId", msgId);
+        call.resolve(ret);
+    }
+
+    // ── CORE MESH ROUTING ENGINE (A -> B -> C RELAY & STORE-AND-FORWARD) ──
+
+    private void routeAndSendMeshPacket(JSObject packet) {
+        try {
+            String messageId = packet.getString("messageId");
+            String destinationId = packet.getString("destinationId");
+            int ttl = packet.getInteger("ttl", DEFAULT_TTL);
+
+            if (messageId == null || processedMessageIds.contains(messageId)) {
+                Log.d(TAG, "Mesh Packet ignored (Already processed): " + messageId);
+                return;
+            }
+            processedMessageIds.add(messageId);
+
+            if (ttl <= 0) {
+                Log.w(TAG, "Mesh Packet dropped (TTL Expired): " + messageId);
+                return;
+            }
+
+            // 1. Direct Socket Broadcast / Relay
+            boolean sent = false;
+            if (activeSocket != null && activeSocket.isConnected() && socketWriter != null) {
+                synchronized (this) {
+                    socketWriter.println(packet.toString());
+                    socketWriter.flush();
+                    sent = true;
+                }
+                Log.d(TAG, "Mesh Packet forwarded over active P2P Socket. MessageId: " + messageId);
+            }
+
+            // 2. If node unreachable right now, queue in Store-and-Forward
+            if (!sent) {
+                offlineMeshQueue.add(packet);
+                Log.d(TAG, "Mesh Packet queued in Store-and-Forward queue. MessageId: " + messageId);
+            }
+
+            // 3. Process queued messages if connection opens
+            flushOfflineMeshQueue();
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error routing mesh packet: " + e.getMessage());
+        }
+    }
+
+    private void processIncomingMeshPacket(JSObject packet) {
+        try {
+            String messageId = packet.getString("messageId");
+            String senderId = packet.getString("senderId");
+            String destinationId = packet.getString("destinationId");
+            int ttl = packet.getInteger("ttl", DEFAULT_TTL);
+            int hops = packet.getInteger("hops", 1);
+
+            if (messageId == null || processedMessageIds.contains(messageId)) {
+                return;
+            }
+            processedMessageIds.add(messageId);
+
+            // Update local route table (Direct or Multi-hop path)
+            if (senderId != null) {
+                routeTable.put(senderId, new RouteEntry(senderId, senderId, hops));
+            }
+
+            // Target match check: Is this packet meant for ME?
+            if (localDeviceId.equals(destinationId) || "broadcast".equals(destinationId)) {
+                Log.d(TAG, "Mesh Packet ARRIVED AT DESTINATION! MessageId: " + messageId + " | Hops: " + hops);
+
+                JSObject msgEvent = new JSObject();
+                msgEvent.put("messageId", messageId);
+                msgEvent.put("senderId", senderId);
+                msgEvent.put("senderName", packet.getString("senderName", "ZapChat User"));
+                msgEvent.put("hops", hops);
+                msgEvent.put("isMeshRelayed", hops > 1);
+
+                JSObject payload = packet.getJSObject("payload");
+                if (payload != null) {
+                    msgEvent.put("text", payload.getString("text"));
+                    msgEvent.put("timestamp", payload.getLong("timestamp", System.currentTimeMillis()));
+                }
+
+                notifyListeners("onMessageReceived", msgEvent);
+
+                // Notify UI about successful Mesh Relay
+                JSObject meshRelayObj = new JSObject();
+                meshRelayObj.put("messageId", messageId);
+                meshRelayObj.put("senderId", senderId);
+                meshRelayObj.put("destinationId", destinationId);
+                meshRelayObj.put("hops", hops);
+                meshRelayObj.put("status", "DELIVERED");
+                notifyListeners("onMeshPacketRelayed", meshRelayObj);
+
+                if (localDeviceId.equals(destinationId)) {
+                    return; // Destination reached, no further relay needed
+                }
+            }
+
+            // RELAY NODE ACTION: Forward packet A -> B -> C
+            if (ttl > 1) {
+                JSObject relayPacket = new JSObject(packet.toString());
+                relayPacket.put("ttl", ttl - 1);
+                relayPacket.put("hops", hops + 1);
+
+                Log.d(TAG, "RELAYING Mesh Packet (A -> B -> C). Hop " + (hops + 1) + " | TTL: " + (ttl - 1));
+
+                routeAndSendMeshPacket(relayPacket);
+
+                JSObject relayEvt = new JSObject();
+                relayEvt.put("messageId", messageId);
+                relayEvt.put("senderId", senderId);
+                relayEvt.put("destinationId", destinationId);
+                relayEvt.put("hops", hops + 1);
+                relayEvt.put("status", "FORWARDED");
+                notifyListeners("onMeshPacketRelayed", relayEvt);
+            } else {
+                Log.d(TAG, "Mesh Packet TTL expired at relay node: " + messageId);
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error processing incoming mesh packet: " + e.getMessage());
+        }
+    }
+
+    private void flushOfflineMeshQueue() {
+        if (activeSocket == null || !activeSocket.isConnected() || socketWriter == null) return;
+        if (offlineMeshQueue.isEmpty()) return;
+
+        synchronized (offlineMeshQueue) {
+            List<JSObject> toRemove = new ArrayList<>();
+            for (JSObject packet : offlineMeshQueue) {
+                try {
+                    socketWriter.println(packet.toString());
+                    socketWriter.flush();
+                    toRemove.add(packet);
+                    Log.d(TAG, "Flushed Queued Mesh Packet: " + packet.getString("messageId"));
+                } catch (Exception e) {
+                    break;
+                }
+            }
+            offlineMeshQueue.removeAll(toRemove);
+        }
+    }
 
     @PluginMethod
     public void checkPermissions(PluginCall call) {
@@ -425,47 +661,37 @@ public class WifiDirectPlugin extends Plugin {
     @PluginMethod
     public void sendMessage(PluginCall call) {
         String text = call.getString("text");
-        String messageId = call.getString("messageId");
+        String destinationId = call.getString("destinationId", "broadcast");
         String senderName = call.getString("senderName", "ZapChat User");
-        String senderId = call.getString("senderId", "local_user");
 
         if (text == null || text.trim().isEmpty()) {
             call.reject("Message text cannot be empty.");
             return;
         }
 
-        if (messageId == null || messageId.trim().isEmpty()) {
-            messageId = "p2p_" + System.currentTimeMillis() + "_" + (int)(Math.random() * 10000);
-        }
+        String msgId = "mesh_" + System.currentTimeMillis() + "_" + (int)(Math.random() * 10000);
 
-        if (activeSocket == null || !activeSocket.isConnected() || socketWriter == null) {
-            call.reject("No active Wi-Fi Direct connection. Connect to a device first.");
-            return;
-        }
+        JSObject packet = new JSObject();
+        packet.put("type", "MESH_PACKET");
+        packet.put("messageId", msgId);
+        packet.put("senderId", localDeviceId);
+        packet.put("senderName", senderName);
+        packet.put("destinationId", destinationId);
+        packet.put("ttl", DEFAULT_TTL);
+        packet.put("hops", 1);
+        packet.put("msgType", "TEXT");
 
-        final String finalMsgId = messageId;
-        final String jsonMessage = buildTextJson(finalMsgId, text, senderId, senderName);
+        JSObject payload = new JSObject();
+        payload.put("text", text);
+        payload.put("timestamp", System.currentTimeMillis());
+        packet.put("payload", payload);
 
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    synchronized (WifiDirectPlugin.this) {
-                        if (socketWriter != null) {
-                            socketWriter.println(jsonMessage);
-                            socketWriter.flush();
-                            processedMessageIds.add(finalMsgId);
-                        }
-                    }
-                    JSObject ret = new JSObject();
-                    ret.put("success", true);
-                    ret.put("messageId", finalMsgId);
-                    call.resolve(ret);
-                } catch (Exception e) {
-                    call.reject("Failed to send message: " + e.getMessage());
-                }
-            }
-        }).start();
+        routeAndSendMeshPacket(packet);
+
+        JSObject ret = new JSObject();
+        ret.put("success", true);
+        ret.put("messageId", msgId);
+        call.resolve(ret);
     }
 
     @PluginMethod
@@ -475,7 +701,6 @@ public class WifiDirectPlugin extends Plugin {
         String mimeType = call.getString("mimeType", "application/octet-stream");
         String transferId = call.getString("transferId");
         String senderName = call.getString("senderName", "ZapChat User");
-        String senderId = call.getString("senderId", "local_user");
 
         if (filePath == null || filePath.isEmpty()) {
             call.reject("filePath is required.");
@@ -527,7 +752,7 @@ public class WifiDirectPlugin extends Plugin {
                     headerObj.put("mimeType", mimeType);
                     headerObj.put("fileSize", fileSize);
                     headerObj.put("senderName", senderName);
-                    headerObj.put("senderId", senderId);
+                    headerObj.put("senderId", localDeviceId);
                     headerObj.put("checksum", fileSize + "_" + cleanFilename);
 
                     synchronized (WifiDirectPlugin.this) {
@@ -607,7 +832,7 @@ public class WifiDirectPlugin extends Plugin {
     @PluginMethod
     public void startVoiceCall(PluginCall call) {
         String callerName = call.getString("callerName", "ZapChat User");
-        String callerId = call.getString("callerId", "local_user");
+        String callerId = call.getString("callerId", localDeviceId);
 
         if (activeSocket == null || !activeSocket.isConnected() || socketWriter == null) {
             call.reject("No active Wi-Fi Direct connection.");
@@ -708,7 +933,7 @@ public class WifiDirectPlugin extends Plugin {
     @PluginMethod
     public void startVideoCall(PluginCall call) {
         String callerName = call.getString("callerName", "ZapChat User");
-        String callerId = call.getString("callerId", "local_user");
+        String callerId = call.getString("callerId", localDeviceId);
 
         if (activeSocket == null || !activeSocket.isConnected() || socketWriter == null) {
             call.reject("No active Wi-Fi Direct connection.");
@@ -893,9 +1118,6 @@ public class WifiDirectPlugin extends Plugin {
         if (!isVideoCall) return;
         isCameraEnabled = true;
 
-        Log.d(TAG, "Starting Real-time P2P Video Call Engine...");
-
-        // 1. Receive UDP Video Frame Stream on Port 8890
         videoReceiveThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -928,7 +1150,6 @@ public class WifiDirectPlugin extends Plugin {
         });
         videoReceiveThread.start();
 
-        // 2. Start Local Camera Capture & UDP Send Engine
         restartCameraPreview();
     }
 
@@ -977,7 +1198,7 @@ public class WifiDirectPlugin extends Plugin {
                 public void onPreviewFrame(byte[] data, Camera camera) {
                     if (!isCallActive || !isVideoCall || !isCameraEnabled || targetAddress == null) return;
                     long now = System.currentTimeMillis();
-                    if (now - lastFrameTime < 66) return; // Cap @ 15 FPS for low latency
+                    if (now - lastFrameTime < 66) return;
                     lastFrameTime = now;
 
                     try {
@@ -990,13 +1211,11 @@ public class WifiDirectPlugin extends Plugin {
                         yuvImage.compressToJpeg(new Rect(0, 0, width, height), 50, os);
                         byte[] jpegBytes = os.toByteArray();
 
-                        // Notify local preview
                         String localBase64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP);
                         JSObject localObj = new JSObject();
                         localObj.put("frameData", "data:image/jpeg;base64," + localBase64);
                         notifyListeners("onLocalVideoFrame", localObj);
 
-                        // Send via UDP Datagram Packet
                         if (jpegBytes.length < 60000 && videoSendSocket != null && !videoSendSocket.isClosed()) {
                             DatagramPacket packet = new DatagramPacket(jpegBytes, jpegBytes.length, targetAddress, VIDEO_PORT);
                             videoSendSocket.send(packet);
@@ -1070,6 +1289,7 @@ public class WifiDirectPlugin extends Plugin {
         ret.put("isConnected", activeSocket != null && activeSocket.isConnected());
         ret.put("isCallActive", isCallActive);
         ret.put("isVideoCall", isVideoCall);
+        ret.put("localDeviceId", localDeviceId);
         call.resolve(ret);
     }
 
@@ -1078,7 +1298,7 @@ public class WifiDirectPlugin extends Plugin {
         obj.put("type", "TEXT");
         obj.put("messageId", messageId);
         obj.put("text", text);
-        obj.put("senderId", senderId);
+        obj.put("senderId", senderId != null ? senderId : localDeviceId);
         obj.put("senderName", senderName);
         obj.put("timestamp", System.currentTimeMillis());
         return obj.toString();
@@ -1095,6 +1315,7 @@ public class WifiDirectPlugin extends Plugin {
                     Socket socket = serverSocket.accept();
                     activeSocket = socket;
                     setupSocketStreams(socket);
+                    flushOfflineMeshQueue();
                 } catch (IOException e) {
                     Log.e(TAG, "ServerThread Exception: " + e.getMessage());
                 }
@@ -1122,6 +1343,7 @@ public class WifiDirectPlugin extends Plugin {
                 if (socket != null && socket.isConnected()) {
                     activeSocket = socket;
                     setupSocketStreams(socket);
+                    flushOfflineMeshQueue();
                 } else {
                     notifyError("Failed to connect to device socket.");
                 }
@@ -1146,7 +1368,10 @@ public class WifiDirectPlugin extends Plugin {
                                 JSObject obj = new JSObject(line);
                                 String type = obj.getString("type", "TEXT");
 
-                                if ("TEXT".equals(type)) {
+                                if ("MESH_PACKET".equals(type)) {
+                                    processIncomingMeshPacket(obj);
+
+                                } else if ("TEXT".equals(type)) {
                                     String messageId = obj.getString("messageId");
                                     if (messageId != null && processedMessageIds.contains(messageId)) continue;
                                     if (messageId != null) processedMessageIds.add(messageId);
