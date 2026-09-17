@@ -39,8 +39,18 @@ export const AuthProvider = ({ children }) => {
 
   useEffect(() => {
     const checkLoggedIn = async () => {
+      // 1. First check active offline session (works without internet)
+      const offlineUser = await getActiveOfflineSession();
+      if (offlineUser && offlineUser.accountType === 'LOCAL_OFFLINE') {
+        setUser(offlineUser);
+        setAuthMode('OFFLINE');
+        setLoading(false);
+        return;
+      }
+
+      // 2. Then try online token if internet available
       const token = localStorage.getItem('token');
-      if (token && navigator.onLine) {
+      if (token) {
         try {
           const res = await api.get('/auth/me');
           setUser({ ...res.data, token, accountType: 'ONLINE', isOffline: false });
@@ -48,89 +58,97 @@ export const AuthProvider = ({ children }) => {
           setLoading(false);
           return;
         } catch (error) {
-          console.warn("Online token verification failed, checking offline session:", error.message);
+          console.warn('[AuthContext] Online token verification failed:', error.message);
+          // Token expired or server unreachable - clear it
+          localStorage.removeItem('token');
         }
       }
 
-      // Check active offline local session fallback
-      const offlineUser = await getActiveOfflineSession();
-      if (offlineUser) {
-        setUser(offlineUser);
-        setAuthMode('OFFLINE');
-      }
       setLoading(false);
     };
     checkLoggedIn();
   }, []);
 
+  // ── Online Login ───────────────────────────────────────────────────────────
   const login = async (email, password) => {
     try {
       const res = await api.post('/auth/login', { email, password });
       if (res.data && res.data.token) {
         localStorage.setItem('token', res.data.token);
+        // Clear any offline session when going online
+        await clearActiveOfflineSession();
         const userData = { ...res.data, accountType: 'ONLINE', isOffline: false };
         setUser(userData);
         setAuthMode('ONLINE');
         return userData;
       } else {
-        throw new Error('No token received from server');
+        throw new Error('Server سے token نہیں ملا');
       }
     } catch (error) {
-      console.error('Online login request failed:', error);
+      console.error('[AuthContext] Online login failed:', error);
       throw error;
     }
   };
 
+  // ── Online Register ────────────────────────────────────────────────────────
   const register = async (displayName, email, password, phone) => {
     try {
       const res = await api.post('/auth/register', { displayName, email, password, phone });
       if (res.data && res.data.token) {
         localStorage.setItem('token', res.data.token);
+        await clearActiveOfflineSession();
         const userData = { ...res.data, accountType: 'ONLINE', isOffline: false };
         setUser(userData);
         setAuthMode('ONLINE');
         return userData;
       } else {
-        throw new Error('No token received from server');
+        throw new Error('Server سے token نہیں ملا');
       }
     } catch (error) {
-      console.error('Online registration request failed:', error);
+      console.error('[AuthContext] Online registration failed:', error);
       throw error;
     }
   };
 
-  // ── Step 10: Offline Authentication Methods ────────────────────────────────
-
+  // ── STEP 10: Offline Account Creation ─────────────────────────────────────
   const createOfflineAccount = async (displayName, username, password) => {
     try {
       const offlineUser = await createLocalUser({ displayName, username, password });
+      // Clear any online token
+      localStorage.removeItem('token');
       setUser(offlineUser);
       setAuthMode('OFFLINE');
       return offlineUser;
     } catch (error) {
-      console.error('Offline account creation failed:', error);
+      console.error('[AuthContext] Offline account creation failed:', error);
       throw error;
     }
   };
 
+  // ── STEP 10: Offline Login ─────────────────────────────────────────────────
   const loginOffline = async (username, password) => {
     try {
       const offlineUser = await verifyLocalPassword(username, password);
+      // Clear any online token
+      localStorage.removeItem('token');
       setUser(offlineUser);
       setAuthMode('OFFLINE');
       return offlineUser;
     } catch (error) {
-      console.error('Offline login failed:', error);
+      console.error('[AuthContext] Offline login failed:', error);
       throw error;
     }
   };
 
+  // ── Logout ─────────────────────────────────────────────────────────────────
   const logout = () => {
     localStorage.removeItem('token');
     clearActiveOfflineSession();
     setUser(null);
+    setAuthMode('ONLINE');
   };
 
+  // ── Update Profile ─────────────────────────────────────────────────────────
   const updateProfile = async (profileData) => {
     if (user?.isOffline) {
       const updated = { ...user, ...profileData };
@@ -143,7 +161,7 @@ export const AuthProvider = ({ children }) => {
       setUser(prev => ({ ...prev, ...res.data }));
       return res.data;
     } catch (error) {
-      console.error('Update profile failed:', error);
+      console.error('[AuthContext] Update profile failed:', error);
       throw error;
     }
   };

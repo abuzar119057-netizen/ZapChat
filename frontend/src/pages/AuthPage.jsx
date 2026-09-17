@@ -20,6 +20,12 @@ const AuthPage = () => {
 
     const { login, register, createOfflineAccount, loginOffline } = useAuth();
 
+    const clearForm = () => {
+        setPassword('');
+        setConfirmPassword('');
+        setError('');
+    };
+
     const handleSubmit = async (e) => {
         e.preventDefault();
         setError('');
@@ -28,21 +34,24 @@ const AuthPage = () => {
         try {
             if (mode === 'OFFLINE') {
                 if (isLogin) {
-                    if (!username || !password) {
-                        throw new Error('Please enter your offline username and password.');
+                    const trimmedUsername = username.trim();
+                    if (!trimmedUsername || !password) {
+                        throw new Error('براہ کرم username اور password درج کریں۔');
                     }
-                    await loginOffline(username, password);
+                    await loginOffline(trimmedUsername, password);
                 } else {
-                    if (!displayName || !username || !password) {
-                        throw new Error('Please fill in all required fields.');
+                    const trimmedDisplay = displayName.trim();
+                    const trimmedUser = username.trim();
+                    if (!trimmedDisplay || !trimmedUser || !password) {
+                        throw new Error('براہ کرم تمام ضروری خانے بھریں (نام، username، password)۔');
                     }
                     if (password.length < 4) {
-                        throw new Error('Password must be at least 4 characters long.');
+                        throw new Error('Password کم از کم 4 حروف کا ہونا چاہیے۔');
                     }
                     if (password !== confirmPassword) {
-                        throw new Error('Passwords do not match.');
+                        throw new Error('دونوں passwords ایک جیسے نہیں ہیں۔');
                     }
-                    await createOfflineAccount(displayName, username, password);
+                    await createOfflineAccount(trimmedDisplay, trimmedUser, password);
                 }
             } else {
                 if (isLogin) {
@@ -52,7 +61,7 @@ const AuthPage = () => {
                 }
             }
         } catch (err) {
-            setError(err.response?.data?.message || err.message || 'Authentication failed.');
+            setError(err.response?.data?.message || err.message || 'Authentication ناکام ہوئی۔');
         } finally {
             setLoading(false);
         }
@@ -109,7 +118,7 @@ const AuthPage = () => {
                 }}>
                     <button
                         type="button"
-                        onClick={() => { setMode('ONLINE'); setError(''); }}
+                        onClick={() => { setMode('ONLINE'); clearForm(); }}
                         style={{
                             flex: 1,
                             padding: '10px 12px',
@@ -133,7 +142,7 @@ const AuthPage = () => {
                     </button>
                     <button
                         type="button"
-                        onClick={() => { setMode('OFFLINE'); setError(''); }}
+                        onClick={() => { setMode('OFFLINE'); clearForm(); }}
                         style={{
                             flex: 1,
                             padding: '10px 12px',
@@ -187,7 +196,7 @@ const AuthPage = () => {
                 <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1.5vh' }}>
                     
                     {/* Display Name (Online Register OR Offline Signup) */}
-                    {(!isLogin || mode === 'OFFLINE' && !isLogin) && (
+                    {(!isLogin) && (
                         <div style={{ display: 'flex', alignItems: 'center', padding: '14px 18px', border: '1px solid #E5E5EA', borderRadius: '14px', background: '#FFF' }}>
                             <User size={20} color="#8E8E93" style={{ marginRight: '12px' }} />
                             <input
@@ -309,7 +318,7 @@ const AuthPage = () => {
                 <p style={{ color: '#8E8E93', fontSize: '14px' }}>
                     {isLogin ? "Don't have an account?" : "Already have an account?"}{' '}
                     <span 
-                        onClick={() => { setIsLogin(!isLogin); setError(''); }} 
+                        onClick={() => { setIsLogin(!isLogin); clearForm(); }} 
                         style={{ color: mode === 'OFFLINE' ? '#34C759' : '#007AFF', fontWeight: '700', cursor: 'pointer', marginLeft: '4px' }}
                     >
                         {isLogin ? (mode === 'OFFLINE' ? 'Create Offline Account' : 'Sign up') : (mode === 'OFFLINE' ? 'Sign In' : 'Login')}
