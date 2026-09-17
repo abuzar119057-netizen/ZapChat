@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Wifi, WifiOff, RefreshCw, Send, AlertCircle, ShieldAlert, CheckCircle2, Smartphone, X, Zap, Radio, Paperclip, Image as ImageIcon, Video as VideoIcon, FileText, Download, Phone, PhoneCall, PhoneOff, Mic, MicOff, Volume2, VolumeX, User } from 'lucide-react';
+import { Wifi, WifiOff, RefreshCw, Send, AlertCircle, ShieldAlert, CheckCircle2, Smartphone, X, Zap, Radio, Paperclip, Image as ImageIcon, Video as VideoIcon, FileText, Download, Phone, PhoneCall, PhoneOff, Mic, MicOff, Volume2, VolumeX, Camera, CameraOff, SwitchCamera, User } from 'lucide-react';
 import { wifiDirectService } from '../services/wifiDirectService';
 import { useAuth } from '../context/AuthContext';
 
@@ -16,12 +16,16 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
   const [hasPermission, setHasPermission] = useState(true);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
 
-  // Real-time Voice Call States
+  // Real-time Voice & Video Call States
   const [callState, setCallState] = useState('idle'); // 'idle', 'calling', 'incoming', 'connected', 'ended'
+  const [isVideoCall, setIsVideoCall] = useState(false);
   const [activeCallId, setActiveCallId] = useState(null);
   const [callerName, setCallerName] = useState('ZapChat User');
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(false);
+  const [isCameraEnabled, setIsCameraEnabled] = useState(true);
+  const [remoteVideoFrame, setRemoteVideoFrame] = useState(null);
+  const [localVideoFrame, setLocalVideoFrame] = useState(null);
   const [callDuration, setCallDuration] = useState(0);
 
   // File Inputs Refs
@@ -147,17 +151,16 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       });
     });
 
-    // ── VOICE CALL EVENT LISTENERS ──
+    // ── VOICE & VIDEO CALL EVENT LISTENERS ──
 
     const callReqSub = wifiDirectService.onCallRequest((data) => {
-      console.log('Incoming P2P Call Request:', data);
       setActiveCallId(data.callId);
       setCallerName(data.callerName || 'Nearby ZapChat User');
+      setIsVideoCall(!!data.isVideo);
       setCallState('incoming');
     });
 
     const callAccSub = wifiDirectService.onCallAccepted((data) => {
-      console.log('P2P Call Accepted by peer:', data);
       setCallState('connected');
       setCallDuration(0);
       clearInterval(timerRef.current);
@@ -167,17 +170,29 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     });
 
     const callRejSub = wifiDirectService.onCallRejected(() => {
-      console.log('P2P Call Rejected');
       setCallState('ended');
       clearInterval(timerRef.current);
       setTimeout(() => setCallState('idle'), 2000);
     });
 
     const callEndSub = wifiDirectService.onCallEnded(() => {
-      console.log('P2P Call Ended');
       setCallState('ended');
       clearInterval(timerRef.current);
+      setRemoteVideoFrame(null);
+      setLocalVideoFrame(null);
       setTimeout(() => setCallState('idle'), 2000);
+    });
+
+    const remoteVideoSub = wifiDirectService.onRemoteVideoFrame((data) => {
+      if (data && data.frameData) {
+        setRemoteVideoFrame(data.frameData);
+      }
+    });
+
+    const localVideoSub = wifiDirectService.onLocalVideoFrame((data) => {
+      if (data && data.frameData) {
+        setLocalVideoFrame(data.frameData);
+      }
     });
 
     const errSub = wifiDirectService.onError((err) => {
@@ -196,6 +211,8 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
       if (callAccSub && callAccSub.remove) callAccSub.remove();
       if (callRejSub && callRejSub.remove) callRejSub.remove();
       if (callEndSub && callEndSub.remove) callEndSub.remove();
+      if (remoteVideoSub && remoteVideoSub.remove) remoteVideoSub.remove();
+      if (localVideoSub && localVideoSub.remove) localVideoSub.remove();
       if (errSub && errSub.remove) errSub.remove();
       clearInterval(timerRef.current);
     };
@@ -213,7 +230,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     if (res && res.granted) {
       setHasPermission(true);
     } else {
-      setErrorMessage('Permission denied. Please grant Location, Nearby Devices, and Microphone permissions in Android Settings.');
+      setErrorMessage('Permission denied. Please grant Location, Nearby Devices, Camera and Microphone permissions in Android Settings.');
     }
   };
 
@@ -345,11 +362,12 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     }
   };
 
-  // ── VOICE CALLING CONTROLS ──
+  // ── VOICE & VIDEO CALLING CONTROLS ──
 
-  const handleStartCall = async () => {
+  const handleStartVoiceCall = async () => {
     setErrorMessage('');
     try {
+      setIsVideoCall(false);
       setCallState('calling');
       setCallerName(connectedDevice?.deviceName || 'Nearby ZapChat User');
       const res = await wifiDirectService.startVoiceCall({
@@ -362,6 +380,25 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     } catch (e) {
       setCallState('idle');
       setErrorMessage(e.message || 'Failed to initiate Wi-Fi Direct voice call.');
+    }
+  };
+
+  const handleStartVideoCall = async () => {
+    setErrorMessage('');
+    try {
+      setIsVideoCall(true);
+      setCallState('calling');
+      setCallerName(connectedDevice?.deviceName || 'Nearby ZapChat User');
+      const res = await wifiDirectService.startVideoCall({
+        callerName: user?.name || user?.username || 'ZapChat User',
+        callerId: user?._id || 'local_user'
+      });
+      if (res && res.callId) {
+        setActiveCallId(res.callId);
+      }
+    } catch (e) {
+      setCallState('idle');
+      setErrorMessage(e.message || 'Failed to initiate Wi-Fi Direct video call.');
     }
   };
 
@@ -394,11 +431,23 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
     try {
       setCallState('ended');
       clearInterval(timerRef.current);
+      setRemoteVideoFrame(null);
+      setLocalVideoFrame(null);
       await wifiDirectService.endVoiceCall({ callId: activeCallId });
       setTimeout(() => setCallState('idle'), 1500);
     } catch (e) {
       setCallState('idle');
     }
+  };
+
+  const handleSwitchCamera = async () => {
+    await wifiDirectService.switchCamera();
+  };
+
+  const handleToggleCamera = async () => {
+    const newEnabled = !isCameraEnabled;
+    setIsCameraEnabled(newEnabled);
+    await wifiDirectService.setCameraEnabled(newEnabled);
   };
 
   const handleToggleMute = async () => {
@@ -470,21 +519,30 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
             </div>
             <div>
               <h2 className="text-base font-bold text-gray-100 flex items-center gap-2">
-                Offline P2P Voice & Chat
+                Offline P2P Video & Voice
               </h2>
               <p className="text-xs text-emerald-400 font-medium">Wi-Fi Direct • No Internet / Cloud Needed</p>
             </div>
           </div>
           
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             {status === 'Connected' && callState === 'idle' && (
-              <button
-                onClick={handleStartCall}
-                className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-full transition-all shadow-[0_0_12px_rgba(16,185,129,0.4)]"
-                title="Start Voice Call over Wi-Fi Direct"
-              >
-                <Phone className="w-4 h-4" />
-              </button>
+              <>
+                <button
+                  onClick={handleStartVoiceCall}
+                  className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-full transition-all shadow"
+                  title="Voice Call"
+                >
+                  <Phone className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleStartVideoCall}
+                  className="p-2 bg-teal-600 hover:bg-teal-500 text-white rounded-full transition-all shadow-[0_0_12px_rgba(20,184,166,0.4)]"
+                  title="Video Call"
+                >
+                  <VideoIcon className="w-4 h-4" />
+                </button>
+              </>
             )}
             <button 
               onClick={onClose}
@@ -518,7 +576,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
             <div>
               <p className="font-semibold text-amber-200">Web Browser Mode</p>
               <p className="mt-0.5 text-amber-300/90">
-                Wi-Fi Direct real-time 1-to-1 Voice Calling requires native Android APK running on two physical Android phones.
+                Wi-Fi Direct real-time 1-to-1 Video Calling requires native Android APK running on two physical Android phones.
               </p>
             </div>
           </div>
@@ -543,7 +601,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
             <Wifi className="w-8 h-8 text-emerald-400 animate-bounce" />
             <h3 className="text-sm font-bold text-emerald-200">Android Permissions Required</h3>
             <p className="text-xs text-gray-300 max-w-xs">
-              Microphone, Nearby Devices & Location permissions are required to make real-time Wi-Fi Direct voice calls offline.
+              Camera, Microphone, Nearby Devices & Location permissions are required to make real-time Wi-Fi Direct video calls offline.
             </p>
             <button
               onClick={handleRequestPermission}
@@ -554,36 +612,79 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
           </div>
         )}
 
-        {/* ── VOICE CALL OVERLAY SCREEN (Calling, Incoming, Connected, Ended) ── */}
+        {/* ── VOICE & VIDEO CALL OVERLAY SCREEN ── */}
         {callState !== 'idle' && (
-          <div className="absolute inset-0 z-40 bg-[#0b141a] flex flex-col items-center justify-between p-8 text-white animate-in fade-in zoom-in-95 duration-200">
-            {/* Header / Peer Avatar */}
-            <div className="flex flex-col items-center gap-4 mt-8">
-              <div className="relative">
-                <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white text-3xl font-bold shadow-2xl ring-4 ring-emerald-500/30">
-                  {callerName[0]?.toUpperCase() || 'Z'}
-                </div>
-                {callState === 'connected' && (
-                  <span className="absolute bottom-0 right-0 w-6 h-6 bg-[#00e676] border-2 border-[#0b141a] rounded-full flex items-center justify-center">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-black" />
-                  </span>
+          <div className="absolute inset-0 z-40 bg-[#0b141a] flex flex-col items-center justify-between p-6 text-white animate-in fade-in zoom-in-95 duration-200">
+            
+            {/* VIDEO CANVAS / PREVIEW DISPLAY (FOR VIDEO CALLS) */}
+            {isVideoCall && callState === 'connected' ? (
+              <div className="relative w-full flex-1 rounded-2xl overflow-hidden bg-black border border-gray-800 shadow-2xl flex items-center justify-center">
+                {/* Remote Video Stream (Main View) */}
+                {remoteVideoFrame ? (
+                  <img
+                    src={remoteVideoFrame}
+                    alt="Remote Video"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-2 text-gray-500">
+                    <VideoIcon className="w-12 h-12 animate-pulse" />
+                    <span className="text-xs">Receiving P2P Video Stream...</span>
+                  </div>
                 )}
-              </div>
 
-              <div className="text-center">
-                <h3 className="text-xl font-bold text-gray-100">{callerName}</h3>
-                <p className="text-xs text-emerald-400 font-semibold mt-1">
-                  {callState === 'calling' && 'Calling via Wi-Fi Direct P2P...'}
-                  {callState === 'incoming' && 'Incoming Offline Voice Call...'}
-                  {callState === 'connected' && `Connected (${formatCallDuration(callDuration)})`}
-                  {callState === 'ended' && 'Call Ended'}
-                </p>
-                <p className="text-[10px] text-gray-500 mt-1">No Cloud / No Server Required</p>
-              </div>
-            </div>
+                {/* Local Camera Preview (Picture-in-Picture) */}
+                <div className="absolute bottom-4 right-4 w-28 h-36 bg-gray-900 border-2 border-emerald-500/60 rounded-xl overflow-hidden shadow-2xl">
+                  {localVideoFrame && isCameraEnabled ? (
+                    <img
+                      src={localVideoFrame}
+                      alt="Local Video"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 bg-gray-900 text-[10px]">
+                      <CameraOff className="w-5 h-5 mb-1" />
+                      <span>Cam Off</span>
+                    </div>
+                  )}
+                </div>
 
-            {/* CALL CONTROLS */}
-            <div className="w-full flex items-center justify-center gap-6 mb-8">
+                {/* Call Overlay Info Badge */}
+                <div className="absolute top-4 left-4 bg-black/60 backdrop-blur-md border border-white/10 px-3 py-1.5 rounded-full flex items-center gap-2 text-xs">
+                  <span className="w-2 h-2 rounded-full bg-[#00e676] animate-ping" />
+                  <span className="font-semibold text-emerald-300">{callerName}</span>
+                  <span className="text-[10px] text-gray-400">• {formatCallDuration(callDuration)}</span>
+                </div>
+              </div>
+            ) : (
+              /* VOICE CALL / CALLING / INCOMING AVATAR HEADER */
+              <div className="flex flex-col items-center gap-4 mt-8">
+                <div className="relative">
+                  <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white text-3xl font-bold shadow-2xl ring-4 ring-emerald-500/30">
+                    {callerName[0]?.toUpperCase() || 'Z'}
+                  </div>
+                  {callState === 'connected' && (
+                    <span className="absolute bottom-0 right-0 w-6 h-6 bg-[#00e676] border-2 border-[#0b141a] rounded-full flex items-center justify-center">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-black" />
+                    </span>
+                  )}
+                </div>
+
+                <div className="text-center">
+                  <h3 className="text-xl font-bold text-gray-100">{callerName}</h3>
+                  <p className="text-xs text-emerald-400 font-semibold mt-1">
+                    {callState === 'calling' && (isVideoCall ? 'Calling Video P2P...' : 'Calling Voice P2P...')}
+                    {callState === 'incoming' && (isVideoCall ? 'Incoming Offline Video Call...' : 'Incoming Offline Voice Call...')}
+                    {callState === 'connected' && `Connected (${formatCallDuration(callDuration)})`}
+                    {callState === 'ended' && 'Call Ended'}
+                  </p>
+                  <p className="text-[10px] text-gray-500 mt-1">Wi-Fi Direct Real-Time Hardware Stream</p>
+                </div>
+              </div>
+            )}
+
+            {/* CALL CONTROLS BAR */}
+            <div className="w-full flex items-center justify-center gap-4 my-4">
               {callState === 'incoming' ? (
                 <>
                   <button
@@ -598,41 +699,68 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                     className="w-16 h-16 rounded-full bg-emerald-600 hover:bg-emerald-500 flex items-center justify-center text-white shadow-[0_0_25px_rgba(16,185,129,0.5)] transition-transform active:scale-95 animate-pulse"
                     title="Accept Call"
                   >
-                    <PhoneCall className="w-7 h-7" />
+                    {isVideoCall ? <VideoIcon className="w-7 h-7" /> : <PhoneCall className="w-7 h-7" />}
                   </button>
                 </>
               ) : (
                 <>
                   {callState === 'connected' && (
                     <>
+                      {/* Switch Front/Back Camera */}
+                      {isVideoCall && (
+                        <button
+                          onClick={handleSwitchCamera}
+                          className="w-12 h-12 rounded-full bg-gray-800 hover:bg-gray-700 text-gray-200 flex items-center justify-center transition-all"
+                          title="Switch Camera"
+                        >
+                          <SwitchCamera className="w-5 h-5" />
+                        </button>
+                      )}
+
+                      {/* Camera ON/OFF */}
+                      {isVideoCall && (
+                        <button
+                          onClick={handleToggleCamera}
+                          className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
+                            !isCameraEnabled ? 'bg-red-500/20 border border-red-500 text-red-400' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
+                          }`}
+                          title={isCameraEnabled ? 'Turn Off Camera' : 'Turn On Camera'}
+                        >
+                          {!isCameraEnabled ? <CameraOff className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
+                        </button>
+                      )}
+
+                      {/* Mute Mic */}
                       <button
                         onClick={handleToggleMute}
-                        className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${
+                        className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
                           isMuted ? 'bg-red-500/20 border border-red-500 text-red-400' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
                         }`}
                         title={isMuted ? 'Unmute Mic' : 'Mute Mic'}
                       >
-                        {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+                        {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
                       </button>
 
+                      {/* Speaker ON/OFF */}
                       <button
                         onClick={handleToggleSpeaker}
-                        className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${
+                        className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
                           isSpeakerOn ? 'bg-emerald-500/20 border border-emerald-500 text-emerald-400' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
                         }`}
                         title={isSpeakerOn ? 'Speaker Off' : 'Speaker On'}
                       >
-                        {isSpeakerOn ? <Volume2 className="w-6 h-6" /> : <VolumeX className="w-6 h-6" />}
+                        {isSpeakerOn ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
                       </button>
                     </>
                   )}
 
+                  {/* End Call Button */}
                   <button
                     onClick={handleEndCall}
-                    className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-500 flex items-center justify-center text-white shadow-xl transition-transform active:scale-95"
+                    className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-500 flex items-center justify-center text-white shadow-xl transition-transform active:scale-95"
                     title="End Call"
                   >
-                    <PhoneOff className="w-7 h-7" />
+                    <PhoneOff className="w-6 h-6" />
                   </button>
                 </>
               )}
@@ -724,16 +852,19 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                   <Wifi className="w-4 h-4 text-[#00e676]" />
                   <span>Wi-Fi Direct Active</span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                   <button
-                    onClick={handleStartCall}
-                    className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1 rounded-lg font-semibold text-[11px] shadow transition-colors"
+                    onClick={handleStartVoiceCall}
+                    className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-2 py-1 rounded-lg font-semibold text-[11px] shadow transition-colors"
                   >
-                    <Phone className="w-3.5 h-3.5" /> Call Voice
+                    <Phone className="w-3 h-3" /> Voice
                   </button>
-                  <span className="text-[10px] text-gray-400 bg-emerald-950 px-2 py-0.5 rounded-md border border-emerald-500/20">
-                    No Internet
-                  </span>
+                  <button
+                    onClick={handleStartVideoCall}
+                    className="flex items-center gap-1 bg-teal-600 hover:bg-teal-500 text-white px-2 py-1 rounded-lg font-semibold text-[11px] shadow transition-colors"
+                  >
+                    <VideoIcon className="w-3 h-3" /> Video
+                  </button>
                 </div>
               </div>
 
@@ -744,7 +875,7 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
                     <Zap className="w-10 h-10 text-emerald-500/50 mb-2" />
                     <p className="text-sm font-semibold text-gray-300">P2P Channel Connected!</p>
                     <p className="text-xs text-gray-400 mt-1 max-w-xs">
-                      Send text, files, or tap the green **Call Voice** button above to start a real-time offline voice call!
+                      Send text, files, or tap **Voice / Video** buttons above to start a real-time offline call!
                     </p>
                   </div>
                 ) : (

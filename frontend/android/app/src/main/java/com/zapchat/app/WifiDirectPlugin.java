@@ -5,6 +5,10 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
+import android.graphics.YuvImage;
+import android.hardware.Camera;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
@@ -24,6 +28,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
 import android.util.Log;
+import android.graphics.SurfaceTexture;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -37,6 +42,7 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -64,20 +70,26 @@ import java.util.concurrent.ConcurrentHashMap;
     permissions = {
         @Permission(alias = "location", strings = { Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION }),
         @Permission(alias = "wifi", strings = { Manifest.permission.ACCESS_WIFI_STATE, Manifest.permission.CHANGE_WIFI_STATE }),
-        @Permission(alias = "audio", strings = { Manifest.permission.RECORD_AUDIO, Manifest.permission.MODIFY_AUDIO_SETTINGS })
+        @Permission(alias = "audio", strings = { Manifest.permission.RECORD_AUDIO, Manifest.permission.MODIFY_AUDIO_SETTINGS }),
+        @Permission(alias = "camera", strings = { Manifest.permission.CAMERA })
     }
 )
 public class WifiDirectPlugin extends Plugin {
     private static final String TAG = "WifiDirectPlugin";
     private static final int P2P_PORT = 8888;
     private static final int AUDIO_PORT = 8889;
+    private static final int VIDEO_PORT = 8890;
     private static final int CHUNK_SIZE = 32768; // 32 KB streaming chunks for files
 
-    // Audio Parameters for crystal-clear real-time P2P voice call
+    // Audio Parameters
     private static final int SAMPLE_RATE = 16000;
     private static final int CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO;
     private static final int CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO;
     private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
+
+    // Video Parameters
+    private static final int FRAME_WIDTH = 320;
+    private static final int FRAME_HEIGHT = 240;
 
     private WifiP2pManager manager;
     private WifiP2pManager.Channel channel;
@@ -96,10 +108,14 @@ public class WifiDirectPlugin extends Plugin {
     private Thread clientThread;
     private Thread readerThread;
 
-    // Real-time Voice Calling State
+    // Real-time Voice Calling & Video Calling State
     private volatile boolean isCallActive = false;
+    private volatile boolean isVideoCall = false;
     private volatile boolean isMuted = false;
     private volatile boolean isSpeakerOn = false;
+    private volatile boolean isCameraEnabled = true;
+    private int currentCameraId = Camera.CameraInfo.CAMERA_FACING_FRONT;
+
     private String activeCallId = null;
     private String remotePeerIpAddress = null;
 
@@ -107,6 +123,14 @@ public class WifiDirectPlugin extends Plugin {
     private Thread audioPlayThread;
     private DatagramSocket audioSendSocket;
     private DatagramSocket audioReceiveSocket;
+
+    // Video Calling Engine Variables
+    private Camera cameraInstance;
+    private SurfaceTexture dummySurfaceTexture;
+    private Thread videoSendThread;
+    private Thread videoReceiveThread;
+    private DatagramSocket videoSendSocket;
+    private DatagramSocket videoReceiveSocket;
 
     private final Set<String> processedMessageIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Map<String, FileTransferSession> activeReceivingTransfers = new ConcurrentHashMap<>();
@@ -179,6 +203,7 @@ public class WifiDirectPlugin extends Plugin {
                                 updateStatus("Disconnected");
                                 closeSockets();
                                 stopVoiceCallEngine();
+                                stopVideoEngine();
                             }
                         }
                     }
@@ -247,6 +272,7 @@ public class WifiDirectPlugin extends Plugin {
                 updateStatus("Disconnected");
                 closeSockets();
                 stopVoiceCallEngine();
+                stopVideoEngine();
             }
         }
     };
@@ -267,7 +293,8 @@ public class WifiDirectPlugin extends Plugin {
             wifiPerm = ctx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
         }
         boolean audioPerm = ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        return wifiPerm && audioPerm;
+        boolean cameraPerm = ctx.checkSelfPermission(Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        return wifiPerm && audioPerm && cameraPerm;
     }
 
     @PluginMethod
@@ -367,6 +394,7 @@ public class WifiDirectPlugin extends Plugin {
 
     @PluginMethod
     public void disconnect(PluginCall call) {
+        stopVideoEngine();
         stopVoiceCallEngine();
         closeSockets();
         if (manager != null && channel != null) {
@@ -492,7 +520,6 @@ public class WifiDirectPlugin extends Plugin {
                         if (f.exists()) fileSize = f.length();
                     }
 
-                    // 1. Send FILE_HEADER
                     JSObject headerObj = new JSObject();
                     headerObj.put("type", "FILE_HEADER");
                     headerObj.put("transferId", finalTransferId);
@@ -508,7 +535,6 @@ public class WifiDirectPlugin extends Plugin {
                         socketWriter.flush();
                     }
 
-                    // 2. Stream File Chunks in 32 KB buffers
                     byte[] buffer = new byte[CHUNK_SIZE];
                     int bytesRead;
                     long totalSent = 0;
@@ -549,7 +575,6 @@ public class WifiDirectPlugin extends Plugin {
                         notifyListeners("onFileTransferProgress", progressObj);
                     }
 
-                    // 3. Send FILE_COMPLETE
                     JSObject completeObj = new JSObject();
                     completeObj.put("type", "FILE_COMPLETE");
                     completeObj.put("transferId", finalTransferId);
@@ -577,7 +602,7 @@ public class WifiDirectPlugin extends Plugin {
         }).start();
     }
 
-    // ── VOICE CALLING NATIVE METHODS ──
+    // ── VOICE CALLING METHODS ──
 
     @PluginMethod
     public void startVoiceCall(PluginCall call) {
@@ -585,17 +610,19 @@ public class WifiDirectPlugin extends Plugin {
         String callerId = call.getString("callerId", "local_user");
 
         if (activeSocket == null || !activeSocket.isConnected() || socketWriter == null) {
-            call.reject("No active Wi-Fi Direct connection. Connect to a device first.");
+            call.reject("No active Wi-Fi Direct connection.");
             return;
         }
 
         activeCallId = "call_" + System.currentTimeMillis();
+        isVideoCall = false;
 
         JSObject reqObj = new JSObject();
         reqObj.put("type", "CALL_REQUEST");
         reqObj.put("callId", activeCallId);
         reqObj.put("callerName", callerName);
         reqObj.put("callerId", callerId);
+        reqObj.put("isVideo", false);
 
         synchronized (this) {
             socketWriter.println(reqObj.toString());
@@ -612,7 +639,7 @@ public class WifiDirectPlugin extends Plugin {
     public void acceptVoiceCall(PluginCall call) {
         String callId = call.getString("callId", activeCallId);
         if (callId == null || socketWriter == null) {
-            call.reject("No active call request to accept.");
+            call.reject("No active call request.");
             return;
         }
 
@@ -626,6 +653,9 @@ public class WifiDirectPlugin extends Plugin {
         }
 
         startVoiceCallEngine();
+        if (isVideoCall) {
+            startVideoEngine();
+        }
 
         JSObject ret = new JSObject();
         ret.put("callId", callId);
@@ -641,7 +671,6 @@ public class WifiDirectPlugin extends Plugin {
             JSObject rejectObj = new JSObject();
             rejectObj.put("type", "CALL_REJECT");
             rejectObj.put("callId", callId);
-            rejectObj.put("reason", "Call declined by user");
 
             synchronized (this) {
                 socketWriter.println(rejectObj.toString());
@@ -650,6 +679,7 @@ public class WifiDirectPlugin extends Plugin {
         }
 
         stopVoiceCallEngine();
+        stopVideoEngine();
         call.resolve();
     }
 
@@ -668,8 +698,75 @@ public class WifiDirectPlugin extends Plugin {
             }
         }
 
+        stopVideoEngine();
         stopVoiceCallEngine();
         call.resolve();
+    }
+
+    // ── VIDEO CALLING NATIVE METHODS ──
+
+    @PluginMethod
+    public void startVideoCall(PluginCall call) {
+        String callerName = call.getString("callerName", "ZapChat User");
+        String callerId = call.getString("callerId", "local_user");
+
+        if (activeSocket == null || !activeSocket.isConnected() || socketWriter == null) {
+            call.reject("No active Wi-Fi Direct connection.");
+            return;
+        }
+
+        activeCallId = "video_" + System.currentTimeMillis();
+        isVideoCall = true;
+
+        JSObject reqObj = new JSObject();
+        reqObj.put("type", "CALL_REQUEST");
+        reqObj.put("callId", activeCallId);
+        reqObj.put("callerName", callerName);
+        reqObj.put("callerId", callerId);
+        reqObj.put("isVideo", true);
+
+        synchronized (this) {
+            socketWriter.println(reqObj.toString());
+            socketWriter.flush();
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("callId", activeCallId);
+        ret.put("status", "Calling");
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void switchCamera(PluginCall call) {
+        if (!isVideoCall || !isCallActive) {
+            call.resolve();
+            return;
+        }
+
+        currentCameraId = (currentCameraId == Camera.CameraInfo.CAMERA_FACING_FRONT)
+                ? Camera.CameraInfo.CAMERA_FACING_BACK
+                : Camera.CameraInfo.CAMERA_FACING_FRONT;
+
+        restartCameraPreview();
+        JSObject ret = new JSObject();
+        ret.put("cameraId", currentCameraId);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void setCameraEnabled(PluginCall call) {
+        Boolean enabled = call.getBoolean("enabled", true);
+        this.isCameraEnabled = enabled != null && enabled;
+
+        if (isCameraEnabled) {
+            restartCameraPreview();
+        } else {
+            releaseCameraHardware();
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("isCameraEnabled", this.isCameraEnabled);
+        call.resolve(ret);
     }
 
     @PluginMethod
@@ -706,9 +803,6 @@ public class WifiDirectPlugin extends Plugin {
         isCallActive = true;
         isMuted = false;
 
-        Log.d(TAG, "Starting Real-time P2P Voice Call Engine...");
-
-        // Start Audio Play Thread (Receiving UDP audio stream on port 8889)
         audioPlayThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -731,7 +825,6 @@ public class WifiDirectPlugin extends Plugin {
                                 audioTrack.write(packet.getData(), 0, packet.getLength());
                             }
                         } catch (SocketTimeoutException ste) {
-                            // Check loop condition
                         }
                     }
                 } catch (Exception e) {
@@ -748,7 +841,6 @@ public class WifiDirectPlugin extends Plugin {
         });
         audioPlayThread.start();
 
-        // Start Audio Record Thread (Sending UDP audio stream on port 8889)
         audioRecordThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -769,10 +861,7 @@ public class WifiDirectPlugin extends Plugin {
                         targetAddress = InetAddress.getByName(remotePeerIpAddress);
                     }
 
-                    if (targetAddress == null) {
-                        Log.e(TAG, "No valid IP address for target peer in voice call!");
-                        return;
-                    }
+                    if (targetAddress == null) return;
 
                     while (isCallActive) {
                         if (isMuted) {
@@ -800,10 +889,163 @@ public class WifiDirectPlugin extends Plugin {
         audioRecordThread.start();
     }
 
+    private synchronized void startVideoEngine() {
+        if (!isVideoCall) return;
+        isCameraEnabled = true;
+
+        Log.d(TAG, "Starting Real-time P2P Video Call Engine...");
+
+        // 1. Receive UDP Video Frame Stream on Port 8890
+        videoReceiveThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    videoReceiveSocket = new DatagramSocket(VIDEO_PORT);
+                    videoReceiveSocket.setSoTimeout(2000);
+                    byte[] videoBuf = new byte[65535];
+
+                    while (isCallActive && isVideoCall) {
+                        try {
+                            DatagramPacket packet = new DatagramPacket(videoBuf, videoBuf.length);
+                            videoReceiveSocket.receive(packet);
+
+                            if (packet.getLength() > 0) {
+                                String base64Frame = Base64.encodeToString(packet.getData(), 0, packet.getLength(), Base64.NO_WRAP);
+                                JSObject frameObj = new JSObject();
+                                frameObj.put("frameData", "data:image/jpeg;base64," + base64Frame);
+                                notifyListeners("onRemoteVideoFrame", frameObj);
+                            }
+                        } catch (SocketTimeoutException ignored) {}
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "VideoReceiveThread error: " + e.getMessage());
+                } finally {
+                    if (videoReceiveSocket != null && !videoReceiveSocket.isClosed()) {
+                        videoReceiveSocket.close();
+                    }
+                }
+            }
+        });
+        videoReceiveThread.start();
+
+        // 2. Start Local Camera Capture & UDP Send Engine
+        restartCameraPreview();
+    }
+
+    private synchronized void restartCameraPreview() {
+        releaseCameraHardware();
+        if (!isCallActive || !isVideoCall || !isCameraEnabled) return;
+
+        try {
+            int cameraCount = Camera.getNumberOfCameras();
+            int selectedCamId = 0;
+            for (int i = 0; i < cameraCount; i++) {
+                Camera.CameraInfo info = new Camera.CameraInfo();
+                Camera.getCameraInfo(i, info);
+                if (info.facing == currentCameraId) {
+                    selectedCamId = i;
+                    break;
+                }
+            }
+
+            cameraInstance = Camera.open(selectedCamId);
+            dummySurfaceTexture = new SurfaceTexture(10);
+            cameraInstance.setPreviewTexture(dummySurfaceTexture);
+
+            Camera.Parameters params = cameraInstance.getParameters();
+            params.setPreviewSize(FRAME_WIDTH, FRAME_HEIGHT);
+            params.setPreviewFormat(ImageFormat.NV21);
+            cameraInstance.setParameters(params);
+
+            try {
+                videoSendSocket = new DatagramSocket();
+            } catch (Exception ignored) {}
+
+            final InetAddress targetAddress;
+            if (activeSocket != null && activeSocket.getInetAddress() != null) {
+                targetAddress = activeSocket.getInetAddress();
+            } else if (remotePeerIpAddress != null) {
+                targetAddress = InetAddress.getByName(remotePeerIpAddress);
+            } else {
+                targetAddress = null;
+            }
+
+            cameraInstance.setPreviewCallback(new Camera.PreviewCallback() {
+                private long lastFrameTime = 0;
+
+                @Override
+                public void onPreviewFrame(byte[] data, Camera camera) {
+                    if (!isCallActive || !isVideoCall || !isCameraEnabled || targetAddress == null) return;
+                    long now = System.currentTimeMillis();
+                    if (now - lastFrameTime < 66) return; // Cap @ 15 FPS for low latency
+                    lastFrameTime = now;
+
+                    try {
+                        Camera.Parameters p = camera.getParameters();
+                        int width = p.getPreviewSize().width;
+                        int height = p.getPreviewSize().height;
+
+                        YuvImage yuvImage = new YuvImage(data, ImageFormat.NV21, width, height, null);
+                        ByteArrayOutputStream os = new ByteArrayOutputStream();
+                        yuvImage.compressToJpeg(new Rect(0, 0, width, height), 50, os);
+                        byte[] jpegBytes = os.toByteArray();
+
+                        // Notify local preview
+                        String localBase64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP);
+                        JSObject localObj = new JSObject();
+                        localObj.put("frameData", "data:image/jpeg;base64," + localBase64);
+                        notifyListeners("onLocalVideoFrame", localObj);
+
+                        // Send via UDP Datagram Packet
+                        if (jpegBytes.length < 60000 && videoSendSocket != null && !videoSendSocket.isClosed()) {
+                            DatagramPacket packet = new DatagramPacket(jpegBytes, jpegBytes.length, targetAddress, VIDEO_PORT);
+                            videoSendSocket.send(packet);
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error encoding video frame: " + e.getMessage());
+                    }
+                }
+            });
+
+            cameraInstance.startPreview();
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error starting Camera Preview: " + e.getMessage());
+        }
+    }
+
+    private synchronized void releaseCameraHardware() {
+        if (cameraInstance != null) {
+            try {
+                cameraInstance.setPreviewCallback(null);
+                cameraInstance.stopPreview();
+                cameraInstance.release();
+            } catch (Exception ignored) {}
+            cameraInstance = null;
+        }
+        if (dummySurfaceTexture != null) {
+            try { dummySurfaceTexture.release(); } catch (Exception ignored) {}
+            dummySurfaceTexture = null;
+        }
+    }
+
+    private synchronized void stopVideoEngine() {
+        isVideoCall = false;
+        releaseCameraHardware();
+        if (videoSendSocket != null && !videoSendSocket.isClosed()) {
+            try { videoSendSocket.close(); } catch (Exception ignored) {}
+        }
+        if (videoReceiveSocket != null && !videoReceiveSocket.isClosed()) {
+            try { videoReceiveSocket.close(); } catch (Exception ignored) {}
+        }
+    }
+
     private synchronized void stopVoiceCallEngine() {
         if (!isCallActive) return;
         isCallActive = false;
         activeCallId = null;
+
+        stopVideoEngine();
 
         if (audioReceiveSocket != null && !audioReceiveSocket.isClosed()) {
             try { audioReceiveSocket.close(); } catch (Exception ignored) {}
@@ -819,8 +1061,6 @@ public class WifiDirectPlugin extends Plugin {
                 am.setSpeakerphoneOn(false);
             }
         } catch (Exception ignored) {}
-
-        Log.d(TAG, "Stopped P2P Voice Call Engine & released audio resources.");
     }
 
     @PluginMethod
@@ -829,6 +1069,7 @@ public class WifiDirectPlugin extends Plugin {
         ret.put("status", currentStatus);
         ret.put("isConnected", activeSocket != null && activeSocket.isConnected());
         ret.put("isCallActive", isCallActive);
+        ret.put("isVideoCall", isVideoCall);
         call.resolve(ret);
     }
 
@@ -922,17 +1163,23 @@ public class WifiDirectPlugin extends Plugin {
 
                                 } else if ("CALL_REQUEST".equals(type)) {
                                     activeCallId = obj.getString("callId");
+                                    isVideoCall = obj.getBoolean("isVideo", false);
                                     notifyListeners("onCallRequest", obj);
 
                                 } else if ("CALL_ACCEPT".equals(type)) {
                                     startVoiceCallEngine();
+                                    if (isVideoCall) {
+                                        startVideoEngine();
+                                    }
                                     notifyListeners("onCallAccepted", obj);
 
                                 } else if ("CALL_REJECT".equals(type)) {
+                                    stopVideoEngine();
                                     stopVoiceCallEngine();
                                     notifyListeners("onCallRejected", obj);
 
                                 } else if ("CALL_END".equals(type)) {
+                                    stopVideoEngine();
                                     stopVoiceCallEngine();
                                     notifyListeners("onCallEnded", obj);
                                 }
@@ -945,6 +1192,7 @@ public class WifiDirectPlugin extends Plugin {
                         Log.d(TAG, "P2P Socket Reader Closed: " + e.getMessage());
                     } finally {
                         updateStatus("Disconnected");
+                        stopVideoEngine();
                         stopVoiceCallEngine();
                         JSObject statusObj = new JSObject();
                         statusObj.put("status", "Disconnected");
@@ -1096,6 +1344,7 @@ public class WifiDirectPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        stopVideoEngine();
         stopVoiceCallEngine();
         closeSockets();
         if (receiver != null) {

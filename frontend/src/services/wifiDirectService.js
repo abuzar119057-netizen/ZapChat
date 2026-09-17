@@ -74,13 +74,20 @@ class WifiDirectService {
     return await WifiDirect.sendFile(fileData);
   }
 
-  // ── VOICE CALLING METHODS ──
+  // ── VOICE & VIDEO CALLING METHODS ──
 
   async startVoiceCall(callData) {
     if (!this.isNative) {
       throw new Error('Offline voice calling requires native Android APK.');
     }
     return await WifiDirect.startVoiceCall(callData);
+  }
+
+  async startVideoCall(callData) {
+    if (!this.isNative) {
+      throw new Error('Offline video calling requires native Android APK.');
+    }
+    return await WifiDirect.startVideoCall(callData);
   }
 
   async acceptVoiceCall(callData) {
@@ -98,6 +105,16 @@ class WifiDirectService {
     return await WifiDirect.endVoiceCall(callData);
   }
 
+  async switchCamera() {
+    if (!this.isNative) return;
+    return await WifiDirect.switchCamera();
+  }
+
+  async setCameraEnabled(enabled) {
+    if (!this.isNative) return;
+    return await WifiDirect.setCameraEnabled({ enabled });
+  }
+
   async setMute(muted) {
     if (!this.isNative) return;
     return await WifiDirect.setMute({ muted });
@@ -110,7 +127,7 @@ class WifiDirectService {
 
   async getConnectionStatus() {
     if (!this.isNative) {
-      return { status: 'Disconnected', isConnected: false, isCallActive: false };
+      return { status: 'Disconnected', isConnected: false, isCallActive: false, isVideoCall: false };
     }
     return await WifiDirect.getConnectionStatus();
   }
@@ -160,6 +177,16 @@ class WifiDirectService {
   onCallEnded(callback) {
     if (!this.isNative) return { remove: () => {} };
     return WifiDirect.addListener('onCallEnded', (data) => callback(data));
+  }
+
+  onRemoteVideoFrame(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onRemoteVideoFrame', (data) => callback(data));
+  }
+
+  onLocalVideoFrame(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onLocalVideoFrame', (data) => callback(data));
   }
 
   onError(callback) {
