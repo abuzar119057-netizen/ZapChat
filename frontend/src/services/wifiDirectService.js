@@ -74,6 +74,21 @@ class WifiDirectService {
     return await WifiDirect.sendFile(fileData);
   }
 
+  async cancelFileTransfer(transferId) {
+    if (!this.isNative) return;
+    return await WifiDirect.cancelFileTransfer({ transferId });
+  }
+
+  async pauseFileTransfer(transferId) {
+    if (!this.isNative) return;
+    return await WifiDirect.pauseFileTransfer({ transferId });
+  }
+
+  async resumeFileTransfer(transferId) {
+    if (!this.isNative) return;
+    return await WifiDirect.resumeFileTransfer({ transferId });
+  }
+
   // ── MULTI-HOP MESH ROUTING METHODS ──
 
   async getLocalDeviceId() {
@@ -210,6 +225,11 @@ class WifiDirectService {
   onFileTransferProgress(callback) {
     if (!this.isNative) return { remove: () => {} };
     return WifiDirect.addListener('onFileTransferProgress', (data) => callback(data));
+  }
+
+  onFileTransferStateChanged(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onFileTransferStateChanged', (data) => callback(data));
   }
 
   onFileReceived(callback) {

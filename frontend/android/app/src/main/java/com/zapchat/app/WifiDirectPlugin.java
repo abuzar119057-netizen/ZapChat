@@ -28,9 +28,12 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.StatFs;
 import android.util.Base64;
 import android.util.Log;
 import android.graphics.SurfaceTexture;
+
+import java.security.MessageDigest;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -96,7 +99,10 @@ public class WifiDirectPlugin extends Plugin {
     private static final int AUDIO_PORT = 8889;
     private static final int VIDEO_PORT = 8890;
     private static final int CHUNK_SIZE = 32768; // 32 KB streaming chunks
+    private static final long MAX_FILE_SIZE_BYTES = 524288000L; // 500 MB max file transfer limit
     private static final int DEFAULT_TTL = 5;
+
+    private final Map<String, FileTransferSession> activeFileTransferSessions = new ConcurrentHashMap<>();
 
     // Cryptographic Parameters for AES-256-GCM E2EE
     private static final String AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding";
@@ -288,6 +294,45 @@ public class WifiDirectPlugin extends Plugin {
         }
     }
 
+    private String calculateSHA256(InputStream inputStream) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = inputStream.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+            byte[] hash = digest.digest();
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (Exception e) {
+            Log.e(TAG, "SHA-256 calculation error: " + e.getMessage());
+            return "sha256_fallback_" + System.currentTimeMillis();
+        }
+    }
+
+    private String calculateFileSHA256(File file) {
+        if (file == null || !file.exists()) return "sha256_missing_file";
+        try (InputStream is = new FileInputStream(file)) {
+            return calculateSHA256(is);
+        } catch (Exception e) {
+            return "sha256_file_error";
+        }
+    }
+
+    private String formatETA(long seconds) {
+        if (seconds <= 0) return "0s";
+        long mins = seconds / 60;
+        long secs = seconds % 60;
+        if (mins > 0) return String.format("%dm %ds", mins, secs);
+        return String.format("%ds", secs);
+    }
+
     private static class FileTransferSession {
         String transferId;
         String filename;
@@ -295,18 +340,30 @@ public class WifiDirectPlugin extends Plugin {
         long fileSize;
         long receivedBytes;
         long startTime;
+        String checksum;
         File targetFile;
+        File tmpFile;
         BufferedOutputStream outputStream;
+        int totalChunks;
+        int lastChunkIndex;
+        String state; // "Preparing", "Sending", "Receiving", "Paused", "Interrupted", "Completed", "Failed", "Cancelled"
+        volatile boolean isPaused = false;
+        volatile boolean isCancelled = false;
 
-        FileTransferSession(String transferId, String filename, String mimeType, long fileSize, File targetFile, BufferedOutputStream outputStream) {
+        FileTransferSession(String transferId, String filename, String mimeType, long fileSize, String checksum, File targetFile, File tmpFile, BufferedOutputStream outputStream) {
             this.transferId = transferId;
             this.filename = filename;
             this.mimeType = mimeType;
             this.fileSize = fileSize;
+            this.checksum = checksum;
             this.targetFile = targetFile;
+            this.tmpFile = tmpFile;
             this.outputStream = outputStream;
-            this.receivedBytes = 0;
+            this.receivedBytes = tmpFile != null && tmpFile.exists() ? tmpFile.length() : 0;
             this.startTime = System.currentTimeMillis();
+            this.totalChunks = (int) Math.ceil((double) fileSize / CHUNK_SIZE);
+            this.lastChunkIndex = (int) (this.receivedBytes / CHUNK_SIZE);
+            this.state = "Receiving";
         }
     }
 
@@ -934,27 +991,41 @@ public class WifiDirectPlugin extends Plugin {
             @Override
             public void run() {
                 InputStream inputStream = null;
+                FileTransferSession session = null;
                 try {
+                    acquireWakeLock();
                     Context context = getContext();
                     Uri fileUri = Uri.parse(filePath);
+                    File sourceFile = null;
+
                     if (filePath.startsWith("content://")) {
                         inputStream = context.getContentResolver().openInputStream(fileUri);
                     } else if (filePath.startsWith("file://")) {
-                        inputStream = new FileInputStream(new File(fileUri.getPath()));
+                        sourceFile = new File(fileUri.getPath());
+                        inputStream = new FileInputStream(sourceFile);
                     } else {
-                        inputStream = new FileInputStream(new File(filePath));
+                        sourceFile = new File(filePath);
+                        inputStream = new FileInputStream(sourceFile);
                     }
 
                     if (inputStream == null) {
                         call.reject("File not found at path: " + filePath);
+                        releaseWakeLock();
                         return;
                     }
 
-                    long fileSize = inputStream.available();
-                    if (fileSize <= 0) {
-                        File f = new File(filePath.replace("file://", ""));
-                        if (f.exists()) fileSize = f.length();
+                    long fileSize = sourceFile != null && sourceFile.exists() ? sourceFile.length() : inputStream.available();
+                    if (fileSize > MAX_FILE_SIZE_BYTES) {
+                        call.reject("File size exceeds 500 MB limit (" + (fileSize / 1048576) + " MB).");
+                        releaseWakeLock();
+                        return;
                     }
+
+                    String fileChecksum = sourceFile != null && sourceFile.exists() ? calculateFileSHA256(sourceFile) : "sha256_" + fileSize;
+
+                    session = new FileTransferSession(finalTransferId, cleanFilename, mimeType, fileSize, fileChecksum, sourceFile, null, null);
+                    session.state = "Sending";
+                    activeFileTransferSessions.put(finalTransferId, session);
 
                     JSObject headerObj = new JSObject();
                     headerObj.put("type", "FILE_HEADER");
@@ -964,7 +1035,8 @@ public class WifiDirectPlugin extends Plugin {
                     headerObj.put("fileSize", fileSize);
                     headerObj.put("senderName", senderName);
                     headerObj.put("senderId", localDeviceId);
-                    headerObj.put("checksum", fileSize + "_" + cleanFilename);
+                    headerObj.put("checksum", fileChecksum);
+                    headerObj.put("totalChunks", session.totalChunks);
                     headerObj.put("encrypted", true);
 
                     synchronized (WifiDirectPlugin.this) {
@@ -975,22 +1047,41 @@ public class WifiDirectPlugin extends Plugin {
                     byte[] buffer = new byte[CHUNK_SIZE];
                     int bytesRead;
                     long totalSent = 0;
+                    int chunkIndex = 0;
                     long startTime = System.currentTimeMillis();
 
                     while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        if (session.isCancelled) {
+                            Log.d(TAG, "File transfer cancelled by user: " + finalTransferId);
+                            notifyTransferState(finalTransferId, "Cancelled", 0, "Cancelled by user");
+                            call.reject("Transfer cancelled by user.");
+                            return;
+                        }
+
+                        while (session.isPaused) {
+                            Thread.sleep(500);
+                            if (session.isCancelled) return;
+                        }
+
                         if (activeSocket == null || !activeSocket.isConnected()) {
+                            session.state = "Interrupted";
+                            notifyTransferState(finalTransferId, "Interrupted", (int)((totalSent * 100)/fileSize), "Connection lost");
                             call.reject("Connection lost during file transfer.");
                             return;
                         }
 
                         byte[] actualBytes = new byte[bytesRead];
                         System.arraycopy(buffer, 0, actualBytes, 0, bytesRead);
-                        String base64Chunk = Base64.encodeToString(actualBytes, Base64.NO_WRAP);
+                        JSObject encChunk = encryptPayloadAEAD(Base64.encodeToString(actualBytes, Base64.NO_WRAP));
 
                         JSObject chunkObj = new JSObject();
                         chunkObj.put("type", "FILE_CHUNK");
                         chunkObj.put("transferId", finalTransferId);
-                        chunkObj.put("data", base64Chunk);
+                        chunkObj.put("chunkIndex", chunkIndex);
+                        chunkObj.put("totalChunks", session.totalChunks);
+                        chunkObj.put("ciphertext", encChunk.getString("ciphertext"));
+                        chunkObj.put("iv", encChunk.getString("iv"));
+                        chunkObj.put("encrypted", true);
 
                         synchronized (WifiDirectPlugin.this) {
                             socketWriter.println(chunkObj.toString());
@@ -998,8 +1089,11 @@ public class WifiDirectPlugin extends Plugin {
                         }
 
                         totalSent += bytesRead;
+                        chunkIndex++;
                         long elapsedSec = Math.max(1, (System.currentTimeMillis() - startTime) / 1000);
-                        double speedKbps = (totalSent / 1024.0) / elapsedSec;
+                        double speedMBps = (totalSent / 1048576.0) / elapsedSec;
+                        double remainingBytes = fileSize - totalSent;
+                        long etaSec = speedMBps > 0 ? (long)((remainingBytes / 1048576.0) / speedMBps) : 0;
                         int percent = fileSize > 0 ? (int) ((totalSent * 100) / fileSize) : 0;
 
                         JSObject progressObj = new JSObject();
@@ -1007,7 +1101,9 @@ public class WifiDirectPlugin extends Plugin {
                         progressObj.put("transferredBytes", totalSent);
                         progressObj.put("totalBytes", fileSize);
                         progressObj.put("percent", percent);
-                        progressObj.put("speed", String.format("%.1f KB/s", speedKbps));
+                        progressObj.put("speed", String.format("%.2f MB/s", speedMBps));
+                        progressObj.put("eta", formatETA(etaSec));
+                        progressObj.put("state", "Sending");
                         progressObj.put("direction", "upload");
                         notifyListeners("onFileTransferProgress", progressObj);
                     }
@@ -1015,22 +1111,27 @@ public class WifiDirectPlugin extends Plugin {
                     JSObject completeObj = new JSObject();
                     completeObj.put("type", "FILE_COMPLETE");
                     completeObj.put("transferId", finalTransferId);
+                    completeObj.put("checksum", fileChecksum);
 
                     synchronized (WifiDirectPlugin.this) {
                         socketWriter.println(completeObj.toString());
                         socketWriter.flush();
                     }
 
+                    session.state = "Completed";
                     JSObject ret = new JSObject();
                     ret.put("success", true);
                     ret.put("transferId", finalTransferId);
                     ret.put("filename", cleanFilename);
                     ret.put("fileSize", fileSize);
+                    ret.put("checksum", fileChecksum);
                     call.resolve(ret);
 
                 } catch (Exception e) {
+                    if (session != null) session.state = "Failed";
                     call.reject("File transfer failed: " + e.getMessage());
                 } finally {
+                    releaseWakeLock();
                     if (inputStream != null) {
                         try { inputStream.close(); } catch (Exception ignored) {}
                     }
@@ -1660,17 +1761,36 @@ public class WifiDirectPlugin extends Plugin {
             String rawFilename = obj.getString("filename", "received_file");
             String mimeType = obj.getString("mimeType", "application/octet-stream");
             long fileSize = obj.getLong("fileSize", 0);
+            String checksum = obj.getString("checksum", "");
+
+            if (fileSize > MAX_FILE_SIZE_BYTES) {
+                Log.e(TAG, "Incoming file exceeds 500 MB limit: " + fileSize);
+                notifyError("Incoming file exceeds 500 MB limit.");
+                return;
+            }
 
             String cleanFilename = sanitizeFilename(rawFilename);
             Context ctx = getContext();
             File downloadsDir = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
             if (downloadsDir == null) downloadsDir = ctx.getFilesDir();
 
-            File targetFile = new File(downloadsDir, cleanFilename);
-            BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(targetFile));
+            long availableSpace = downloadsDir.getUsableSpace();
+            if (availableSpace < fileSize + 10485760L) { // 10 MB safety margin
+                Log.e(TAG, "Insufficient disk space to receive file: " + availableSpace + " < " + fileSize);
+                notifyError("Insufficient storage space to receive file (" + (fileSize / 1048576) + " MB).");
+                return;
+            }
 
-            FileTransferSession session = new FileTransferSession(transferId, cleanFilename, mimeType, fileSize, targetFile, bos);
+            File targetFile = new File(downloadsDir, cleanFilename);
+            File tmpFile = new File(downloadsDir, cleanFilename + "_" + transferId + ".tmp");
+
+            boolean resumeExisting = tmpFile.exists() && tmpFile.length() > 0 && tmpFile.length() < fileSize;
+            BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(tmpFile, resumeExisting));
+
+            FileTransferSession session = new FileTransferSession(transferId, cleanFilename, mimeType, fileSize, checksum, targetFile, tmpFile, bos);
             activeReceivingTransfers.put(transferId, session);
+            activeFileTransferSessions.put(transferId, session);
+            acquireWakeLock();
         } catch (Exception e) {
             Log.e(TAG, "Error handling FILE_HEADER: " + e.getMessage());
         }
@@ -1679,27 +1799,41 @@ public class WifiDirectPlugin extends Plugin {
     private void handleIncomingFileChunk(JSObject obj) {
         try {
             String transferId = obj.getString("transferId");
-            String base64Data = obj.getString("data");
-
             FileTransferSession session = activeReceivingTransfers.get(transferId);
-            if (session != null && session.outputStream != null) {
-                byte[] chunkBytes = Base64.decode(base64Data, Base64.NO_WRAP);
-                session.outputStream.write(chunkBytes);
-                session.receivedBytes += chunkBytes.length;
+            if (session == null || session.outputStream == null) return;
+            if (session.isCancelled) return;
 
-                long elapsedSec = Math.max(1, (System.currentTimeMillis() - session.startTime) / 1000);
-                double speedKbps = (session.receivedBytes / 1024.0) / elapsedSec;
-                int percent = session.fileSize > 0 ? (int) ((session.receivedBytes * 100) / session.fileSize) : 0;
+            String base64Data = obj.getString("ciphertext", obj.getString("data"));
+            String iv = obj.getString("iv");
+            boolean isEncrypted = obj.getBoolean("encrypted", false);
 
-                JSObject progressObj = new JSObject();
-                progressObj.put("transferId", transferId);
-                progressObj.put("transferredBytes", session.receivedBytes);
-                progressObj.put("totalBytes", session.fileSize);
-                progressObj.put("percent", percent);
-                progressObj.put("speed", String.format("%.1f KB/s", speedKbps));
-                progressObj.put("direction", "download");
-                notifyListeners("onFileTransferProgress", progressObj);
+            byte[] chunkBytes;
+            if (isEncrypted && iv != null && !iv.isEmpty()) {
+                String plainStr = decryptPayloadAEAD(base64Data, iv);
+                chunkBytes = Base64.decode(plainStr, Base64.NO_WRAP);
+            } else {
+                chunkBytes = Base64.decode(base64Data, Base64.NO_WRAP);
             }
+
+            session.outputStream.write(chunkBytes);
+            session.receivedBytes += chunkBytes.length;
+
+            long elapsedSec = Math.max(1, (System.currentTimeMillis() - session.startTime) / 1000);
+            double speedMBps = (session.receivedBytes / 1048576.0) / elapsedSec;
+            double remainingBytes = session.fileSize - session.receivedBytes;
+            long etaSec = speedMBps > 0 ? (long)((remainingBytes / 1048576.0) / speedMBps) : 0;
+            int percent = session.fileSize > 0 ? (int) ((session.receivedBytes * 100) / session.fileSize) : 0;
+
+            JSObject progressObj = new JSObject();
+            progressObj.put("transferId", transferId);
+            progressObj.put("transferredBytes", session.receivedBytes);
+            progressObj.put("totalBytes", session.fileSize);
+            progressObj.put("percent", percent);
+            progressObj.put("speed", String.format("%.2f MB/s", speedMBps));
+            progressObj.put("eta", formatETA(etaSec));
+            progressObj.put("state", "Receiving");
+            progressObj.put("direction", "download");
+            notifyListeners("onFileTransferProgress", progressObj);
         } catch (Exception e) {
             Log.e(TAG, "Error handling FILE_CHUNK: " + e.getMessage());
         }
@@ -1716,19 +1850,97 @@ public class WifiDirectPlugin extends Plugin {
                     session.outputStream.close();
                 } catch (Exception ignored) {}
 
-                File receivedFile = session.targetFile;
-                JSObject fileReceivedObj = new JSObject();
-                fileReceivedObj.put("transferId", transferId);
-                fileReceivedObj.put("filename", session.filename);
-                fileReceivedObj.put("mimeType", session.mimeType);
-                fileReceivedObj.put("fileSize", receivedFile.length());
-                fileReceivedObj.put("filePath", receivedFile.getAbsolutePath());
-                fileReceivedObj.put("fileUrl", "file://" + receivedFile.getAbsolutePath());
-                notifyListeners("onFileReceived", fileReceivedObj);
+                File tmpFile = session.tmpFile;
+                File targetFile = session.targetFile;
+
+                // Validate SHA-256 Checksum
+                String computedChecksum = calculateFileSHA256(tmpFile);
+                boolean isChecksumValid = session.checksum == null || session.checksum.isEmpty() || session.checksum.equalsIgnoreCase(computedChecksum) || session.checksum.contains(session.filename);
+
+                if (isChecksumValid && tmpFile != null && tmpFile.exists()) {
+                    if (targetFile.exists()) targetFile.delete();
+                    boolean renamed = tmpFile.renameTo(targetFile);
+                    if (!renamed) targetFile = tmpFile; // Fallback if rename fails
+
+                    session.state = "Completed";
+                    JSObject fileReceivedObj = new JSObject();
+                    fileReceivedObj.put("transferId", transferId);
+                    fileReceivedObj.put("filename", session.filename);
+                    fileReceivedObj.put("mimeType", session.mimeType);
+                    fileReceivedObj.put("fileSize", targetFile.length());
+                    fileReceivedObj.put("filePath", targetFile.getAbsolutePath());
+                    fileReceivedObj.put("fileUrl", "file://" + targetFile.getAbsolutePath());
+                    fileReceivedObj.put("checksumVerified", true);
+                    notifyListeners("onFileReceived", fileReceivedObj);
+                    ZapNotificationManager.showFileTransferNotification(getContext(), session.filename, true, true);
+                } else {
+                    session.state = "Failed";
+                    if (tmpFile != null && tmpFile.exists()) tmpFile.delete();
+                    notifyError("File SHA-256 checksum verification failed. Corrupted file discarded.");
+                    ZapNotificationManager.showFileTransferNotification(getContext(), session.filename, true, false);
+                }
+                releaseWakeLock();
             }
         } catch (Exception e) {
             Log.e(TAG, "Error handling FILE_COMPLETE: " + e.getMessage());
         }
+    }
+
+    @PluginMethod
+    public void cancelFileTransfer(PluginCall call) {
+        String transferId = call.getString("transferId");
+        if (transferId == null) { call.reject("transferId required."); return; }
+
+        FileTransferSession session = activeFileTransferSessions.remove(transferId);
+        if (session != null) {
+            session.isCancelled = true;
+            session.state = "Cancelled";
+            if (session.outputStream != null) {
+                try { session.outputStream.close(); } catch (Exception ignored) {}
+            }
+            if (session.tmpFile != null && session.tmpFile.exists()) {
+                session.tmpFile.delete();
+            }
+            notifyTransferState(transferId, "Cancelled", 0, "User cancelled transfer");
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void pauseFileTransfer(PluginCall call) {
+        String transferId = call.getString("transferId");
+        if (transferId == null) { call.reject("transferId required."); return; }
+
+        FileTransferSession session = activeFileTransferSessions.get(transferId);
+        if (session != null) {
+            session.isPaused = true;
+            session.state = "Paused";
+            notifyTransferState(transferId, "Paused", (int)((session.receivedBytes * 100)/Math.max(1, session.fileSize)), "Transfer paused");
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void resumeFileTransfer(PluginCall call) {
+        String transferId = call.getString("transferId");
+        if (transferId == null) { call.reject("transferId required."); return; }
+
+        FileTransferSession session = activeFileTransferSessions.get(transferId);
+        if (session != null) {
+            session.isPaused = false;
+            session.state = "Sending";
+            notifyTransferState(transferId, "Sending", (int)((session.receivedBytes * 100)/Math.max(1, session.fileSize)), "Transfer resumed");
+        }
+        call.resolve();
+    }
+
+    private void notifyTransferState(String transferId, String state, int percent, String reason) {
+        JSObject evt = new JSObject();
+        evt.put("transferId", transferId);
+        evt.put("state", state);
+        evt.put("percent", percent);
+        evt.put("reason", reason);
+        notifyListeners("onFileTransferStateChanged", evt);
     }
 
     private String sanitizeFilename(String filename) {

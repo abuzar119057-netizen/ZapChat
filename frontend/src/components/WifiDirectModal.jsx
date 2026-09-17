@@ -940,13 +940,28 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
 
                         {/* TRANSFER PROGRESS BAR */}
                         {(msg.isUploading || msg.isDownloading || (msg.percent !== undefined && msg.percent < 100)) && (
-                          <div className="mt-2 w-full bg-black/30 p-2 rounded-xl border border-white/10">
-                            <div className="flex items-center justify-between text-[10px] mb-1 text-gray-200">
-                              <span>{msg.isUploading ? 'Uploading E2EE File...' : 'Downloading E2EE File...'}</span>
-                              <span>{msg.percent || 0}% ({msg.speed || '0 KB/s'})</span>
+                          <div className="mt-2 w-full bg-black/40 p-2.5 rounded-xl border border-white/10 flex flex-col gap-1.5">
+                            <div className="flex items-center justify-between text-[11px] font-semibold text-gray-100">
+                              <span className="text-emerald-300 font-medium">
+                                {msg.state || (msg.isUploading ? 'Sending (500MB Max)...' : 'Receiving (500MB Max)...')}
+                              </span>
+                              <span>{msg.percent || 0}%</span>
                             </div>
-                            <div className="w-full bg-gray-700 h-1.5 rounded-full overflow-hidden">
-                              <div className="bg-emerald-400 h-full transition-all duration-200" style={{ width: `${msg.percent || 0}%` }} />
+                            <div className="w-full bg-gray-800 h-2 rounded-full overflow-hidden border border-white/5">
+                              <div className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full transition-all duration-300" style={{ width: `${msg.percent || 0}%` }} />
+                            </div>
+                            <div className="flex items-center justify-between text-[10px] text-gray-400">
+                              <span>Speed: {msg.speed || '0.0 MB/s'}</span>
+                              <span>ETA: {msg.eta || 'calc...'}</span>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  onClick={() => wifiDirectService.cancelFileTransfer(msg.transferId || msg.messageId)}
+                                  className="px-1.5 py-0.5 bg-red-900/60 hover:bg-red-800 text-red-200 rounded text-[9px] font-bold"
+                                  title="Cancel File Transfer"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )}
