@@ -59,13 +59,18 @@ const messageSchema = new mongoose.Schema({
   reactions: [{
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     emoji: String
-  }]
+  }],
+  localId: {
+    type: String,
+    default: null
+  }
 }, { timestamps: true });
 
 // Message schema indices for faster queries
 messageSchema.index({ sender: 1 });
 messageSchema.index({ recipient: 1 });
 messageSchema.index({ sender: 1, recipient: 1 });
+messageSchema.index({ localId: 1 }, { sparse: true });
 messageSchema.index({ deletedFor: 1 });
 messageSchema.index({ createdAt: -1 });
 messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });

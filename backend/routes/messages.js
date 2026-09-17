@@ -375,6 +375,20 @@ router.post('/sync', protect, async (req, res) => {
         const io = req.app.get('io');
 
         for (const m of messages) {
+            const clientLocalId = m.localId || m.messageId;
+            if (clientLocalId) {
+                const existing = await Message.findOne({ localId: clientLocalId })
+                    .populate('sender', 'displayName profilePicture')
+                    .populate('recipient', 'displayName profilePicture');
+                if (existing) {
+                    synced.push({
+                        localId: clientLocalId,
+                        serverMsg: existing
+                    });
+                    continue;
+                }
+            }
+
             const newMsg = new Message({
                 sender: req.user.id,
                 recipient: m.recipient,
@@ -384,6 +398,7 @@ router.post('/sync', protect, async (req, res) => {
                 fileUrl: m.fileUrl,
                 fileMetadata: m.fileMetadata,
                 status: 'delivered',
+                localId: clientLocalId,
                 createdAt: m.timestamp || m.createdAt || new Date()
             });
 
@@ -394,7 +409,7 @@ router.post('/sync', protect, async (req, res) => {
                 .populate('recipient', 'displayName profilePicture');
 
             synced.push({
-                localId: m.localId,
+                localId: clientLocalId,
                 serverMsg: populatedMsg
             });
 

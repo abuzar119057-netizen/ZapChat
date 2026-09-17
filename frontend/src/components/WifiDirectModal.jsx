@@ -627,6 +627,21 @@ const WifiDirectModal = ({ isOpen, onClose }) => {
             </div>
 
             <div className="flex items-center justify-between text-gray-300">
+              <span>Offline Database Engine:</span>
+              <span className="text-emerald-400 font-semibold">IndexedDB v2 (Offline-First Persistent)</span>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
+              <span>Message Deduplication:</span>
+              <span className="text-emerald-400">Active (Global messageId Key)</span>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
+              <span>Auto Sync Engine:</span>
+              <span className="text-emerald-400">Active (Exponential Retry Backoff)</span>
+            </div>
+
+            <div className="flex items-center justify-between text-gray-300">
               <span>Relay Privacy (Phone B):</span>
               <span className="text-emerald-400">Ciphertext Relay Only (Zero Plaintext Access)</span>
             </div>
