@@ -14,7 +14,7 @@ class WifiDirectService {
 
   async checkPermissions() {
     if (!this.isNative) {
-      return { granted: false, reason: 'Web browser environment — Wi-Fi Direct requires a physical Android phone.' };
+      return { granted: false, reason: 'Web browser mode — Wi-Fi Direct requires a physical Android phone.' };
     }
     try {
       return await WifiDirect.checkPermissions();
@@ -74,12 +74,48 @@ class WifiDirectService {
     return await WifiDirect.sendFile(fileData);
   }
 
+  // ── VOICE CALLING METHODS ──
+
+  async startVoiceCall(callData) {
+    if (!this.isNative) {
+      throw new Error('Offline voice calling requires native Android APK.');
+    }
+    return await WifiDirect.startVoiceCall(callData);
+  }
+
+  async acceptVoiceCall(callData) {
+    if (!this.isNative) return;
+    return await WifiDirect.acceptVoiceCall(callData);
+  }
+
+  async rejectVoiceCall(callData) {
+    if (!this.isNative) return;
+    return await WifiDirect.rejectVoiceCall(callData);
+  }
+
+  async endVoiceCall(callData) {
+    if (!this.isNative) return;
+    return await WifiDirect.endVoiceCall(callData);
+  }
+
+  async setMute(muted) {
+    if (!this.isNative) return;
+    return await WifiDirect.setMute({ muted });
+  }
+
+  async setSpeaker(speakerOn) {
+    if (!this.isNative) return;
+    return await WifiDirect.setSpeaker({ speakerOn });
+  }
+
   async getConnectionStatus() {
     if (!this.isNative) {
-      return { status: 'Disconnected', isConnected: false };
+      return { status: 'Disconnected', isConnected: false, isCallActive: false };
     }
     return await WifiDirect.getConnectionStatus();
   }
+
+  // ── EVENT LISTENERS ──
 
   onPeersDiscovered(callback) {
     if (!this.isNative) return { remove: () => {} };
@@ -104,6 +140,26 @@ class WifiDirectService {
   onFileReceived(callback) {
     if (!this.isNative) return { remove: () => {} };
     return WifiDirect.addListener('onFileReceived', (data) => callback(data));
+  }
+
+  onCallRequest(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onCallRequest', (data) => callback(data));
+  }
+
+  onCallAccepted(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onCallAccepted', (data) => callback(data));
+  }
+
+  onCallRejected(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onCallRejected', (data) => callback(data));
+  }
+
+  onCallEnded(callback) {
+    if (!this.isNative) return { remove: () => {} };
+    return WifiDirect.addListener('onCallEnded', (data) => callback(data));
   }
 
   onError(callback) {

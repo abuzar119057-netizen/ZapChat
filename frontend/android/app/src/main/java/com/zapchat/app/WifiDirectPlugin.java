@@ -5,6 +5,11 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioRecord;
+import android.media.AudioTrack;
+import android.media.MediaRecorder;
 import android.net.NetworkInfo;
 import android.net.Uri;
 import android.net.wifi.p2p.WifiP2pConfig;
@@ -40,9 +45,14 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -53,13 +63,21 @@ import java.util.concurrent.ConcurrentHashMap;
     name = "WifiDirect",
     permissions = {
         @Permission(alias = "location", strings = { Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION }),
-        @Permission(alias = "wifi", strings = { Manifest.permission.ACCESS_WIFI_STATE, Manifest.permission.CHANGE_WIFI_STATE })
+        @Permission(alias = "wifi", strings = { Manifest.permission.ACCESS_WIFI_STATE, Manifest.permission.CHANGE_WIFI_STATE }),
+        @Permission(alias = "audio", strings = { Manifest.permission.RECORD_AUDIO, Manifest.permission.MODIFY_AUDIO_SETTINGS })
     }
 )
 public class WifiDirectPlugin extends Plugin {
     private static final String TAG = "WifiDirectPlugin";
     private static final int P2P_PORT = 8888;
-    private static final int CHUNK_SIZE = 32768; // 32 KB streaming chunks
+    private static final int AUDIO_PORT = 8889;
+    private static final int CHUNK_SIZE = 32768; // 32 KB streaming chunks for files
+
+    // Audio Parameters for crystal-clear real-time P2P voice call
+    private static final int SAMPLE_RATE = 16000;
+    private static final int CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO;
+    private static final int CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO;
+    private static final int AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
 
     private WifiP2pManager manager;
     private WifiP2pManager.Channel channel;
@@ -77,6 +95,18 @@ public class WifiDirectPlugin extends Plugin {
     private Thread serverThread;
     private Thread clientThread;
     private Thread readerThread;
+
+    // Real-time Voice Calling State
+    private volatile boolean isCallActive = false;
+    private volatile boolean isMuted = false;
+    private volatile boolean isSpeakerOn = false;
+    private String activeCallId = null;
+    private String remotePeerIpAddress = null;
+
+    private Thread audioRecordThread;
+    private Thread audioPlayThread;
+    private DatagramSocket audioSendSocket;
+    private DatagramSocket audioReceiveSocket;
 
     private final Set<String> processedMessageIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Map<String, FileTransferSession> activeReceivingTransfers = new ConcurrentHashMap<>();
@@ -128,7 +158,6 @@ public class WifiDirectPlugin extends Plugin {
                 if (WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION.equals(action)) {
                     int state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1);
                     boolean isEnabled = (state == WifiP2pManager.WIFI_P2P_STATE_ENABLED);
-                    Log.d(TAG, "Wi-Fi P2P State Enabled: " + isEnabled);
                     if (!isEnabled) {
                         notifyError("Wi-Fi Direct is disabled. Please enable Wi-Fi in Android Settings.");
                     }
@@ -149,6 +178,7 @@ public class WifiDirectPlugin extends Plugin {
                             if (!"Searching".equals(currentStatus) && !"Connecting".equals(currentStatus)) {
                                 updateStatus("Disconnected");
                                 closeSockets();
+                                stopVoiceCallEngine();
                             }
                         }
                     }
@@ -199,6 +229,7 @@ public class WifiDirectPlugin extends Plugin {
         public void onConnectionInfoAvailable(WifiP2pInfo info) {
             if (info.groupFormed) {
                 String groupOwnerIp = info.groupOwnerAddress != null ? info.groupOwnerAddress.getHostAddress() : "";
+                remotePeerIpAddress = groupOwnerIp;
                 updateStatus("Connected");
 
                 JSObject connObj = new JSObject();
@@ -215,6 +246,7 @@ public class WifiDirectPlugin extends Plugin {
             } else {
                 updateStatus("Disconnected");
                 closeSockets();
+                stopVoiceCallEngine();
             }
         }
     };
@@ -228,11 +260,14 @@ public class WifiDirectPlugin extends Plugin {
 
     private boolean hasRequiredPermissions() {
         Context ctx = getContext();
+        boolean wifiPerm = true;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            return ctx.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            wifiPerm = ctx.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) == android.content.pm.PackageManager.PERMISSION_GRANTED;
         } else {
-            return ctx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            wifiPerm = ctx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
         }
+        boolean audioPerm = ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        return wifiPerm && audioPerm;
     }
 
     @PluginMethod
@@ -332,6 +367,7 @@ public class WifiDirectPlugin extends Plugin {
 
     @PluginMethod
     public void disconnect(PluginCall call) {
+        stopVoiceCallEngine();
         closeSockets();
         if (manager != null && channel != null) {
             try {
@@ -452,7 +488,6 @@ public class WifiDirectPlugin extends Plugin {
 
                     long fileSize = inputStream.available();
                     if (fileSize <= 0) {
-                        // Fallback file size check
                         File f = new File(filePath.replace("file://", ""));
                         if (f.exists()) fileSize = f.length();
                     }
@@ -504,7 +539,6 @@ public class WifiDirectPlugin extends Plugin {
                         double speedKbps = (totalSent / 1024.0) / elapsedSec;
                         int percent = fileSize > 0 ? (int) ((totalSent * 100) / fileSize) : 0;
 
-                        // Emit Upload Progress event to JS
                         JSObject progressObj = new JSObject();
                         progressObj.put("transferId", finalTransferId);
                         progressObj.put("transferredBytes", totalSent);
@@ -533,7 +567,6 @@ public class WifiDirectPlugin extends Plugin {
                     call.resolve(ret);
 
                 } catch (Exception e) {
-                    Log.e(TAG, "File Transfer Error: " + e.getMessage());
                     call.reject("File transfer failed: " + e.getMessage());
                 } finally {
                     if (inputStream != null) {
@@ -544,11 +577,258 @@ public class WifiDirectPlugin extends Plugin {
         }).start();
     }
 
+    // ── VOICE CALLING NATIVE METHODS ──
+
+    @PluginMethod
+    public void startVoiceCall(PluginCall call) {
+        String callerName = call.getString("callerName", "ZapChat User");
+        String callerId = call.getString("callerId", "local_user");
+
+        if (activeSocket == null || !activeSocket.isConnected() || socketWriter == null) {
+            call.reject("No active Wi-Fi Direct connection. Connect to a device first.");
+            return;
+        }
+
+        activeCallId = "call_" + System.currentTimeMillis();
+
+        JSObject reqObj = new JSObject();
+        reqObj.put("type", "CALL_REQUEST");
+        reqObj.put("callId", activeCallId);
+        reqObj.put("callerName", callerName);
+        reqObj.put("callerId", callerId);
+
+        synchronized (this) {
+            socketWriter.println(reqObj.toString());
+            socketWriter.flush();
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("callId", activeCallId);
+        ret.put("status", "Calling");
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void acceptVoiceCall(PluginCall call) {
+        String callId = call.getString("callId", activeCallId);
+        if (callId == null || socketWriter == null) {
+            call.reject("No active call request to accept.");
+            return;
+        }
+
+        JSObject acceptObj = new JSObject();
+        acceptObj.put("type", "CALL_ACCEPT");
+        acceptObj.put("callId", callId);
+
+        synchronized (this) {
+            socketWriter.println(acceptObj.toString());
+            socketWriter.flush();
+        }
+
+        startVoiceCallEngine();
+
+        JSObject ret = new JSObject();
+        ret.put("callId", callId);
+        ret.put("status", "Connected");
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void rejectVoiceCall(PluginCall call) {
+        String callId = call.getString("callId", activeCallId);
+
+        if (socketWriter != null && callId != null) {
+            JSObject rejectObj = new JSObject();
+            rejectObj.put("type", "CALL_REJECT");
+            rejectObj.put("callId", callId);
+            rejectObj.put("reason", "Call declined by user");
+
+            synchronized (this) {
+                socketWriter.println(rejectObj.toString());
+                socketWriter.flush();
+            }
+        }
+
+        stopVoiceCallEngine();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void endVoiceCall(PluginCall call) {
+        String callId = call.getString("callId", activeCallId);
+
+        if (socketWriter != null && callId != null) {
+            JSObject endObj = new JSObject();
+            endObj.put("type", "CALL_END");
+            endObj.put("callId", callId);
+
+            synchronized (this) {
+                socketWriter.println(endObj.toString());
+                socketWriter.flush();
+            }
+        }
+
+        stopVoiceCallEngine();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setMute(PluginCall call) {
+        Boolean muted = call.getBoolean("muted", false);
+        this.isMuted = muted != null && muted;
+        JSObject ret = new JSObject();
+        ret.put("isMuted", this.isMuted);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void setSpeaker(PluginCall call) {
+        Boolean speakerOn = call.getBoolean("speakerOn", false);
+        this.isSpeakerOn = speakerOn != null && speakerOn;
+
+        try {
+            AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                am.setMode(this.isSpeakerOn ? AudioManager.MODE_NORMAL : AudioManager.MODE_IN_COMMUNICATION);
+                am.setSpeakerphoneOn(this.isSpeakerOn);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Speakerphone toggle error: " + e.getMessage());
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("isSpeakerOn", this.isSpeakerOn);
+        call.resolve(ret);
+    }
+
+    private synchronized void startVoiceCallEngine() {
+        if (isCallActive) return;
+        isCallActive = true;
+        isMuted = false;
+
+        Log.d(TAG, "Starting Real-time P2P Voice Call Engine...");
+
+        // Start Audio Play Thread (Receiving UDP audio stream on port 8889)
+        audioPlayThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                AudioTrack audioTrack = null;
+                try {
+                    int minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT);
+                    audioTrack = new AudioTrack(AudioManager.STREAM_VOICE_CALL, SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT, Math.max(minBuf, 2048), AudioTrack.MODE_STREAM);
+                    audioTrack.play();
+
+                    audioReceiveSocket = new DatagramSocket(AUDIO_PORT);
+                    audioReceiveSocket.setSoTimeout(2000);
+
+                    byte[] recvBuf = new byte[1280];
+
+                    while (isCallActive) {
+                        try {
+                            DatagramPacket packet = new DatagramPacket(recvBuf, recvBuf.length);
+                            audioReceiveSocket.receive(packet);
+                            if (packet.getLength() > 0 && audioTrack != null) {
+                                audioTrack.write(packet.getData(), 0, packet.getLength());
+                            }
+                        } catch (SocketTimeoutException ste) {
+                            // Check loop condition
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "AudioPlayThread error: " + e.getMessage());
+                } finally {
+                    if (audioTrack != null) {
+                        try { audioTrack.stop(); audioTrack.release(); } catch (Exception ignored) {}
+                    }
+                    if (audioReceiveSocket != null && !audioReceiveSocket.isClosed()) {
+                        audioReceiveSocket.close();
+                    }
+                }
+            }
+        });
+        audioPlayThread.start();
+
+        // Start Audio Record Thread (Sending UDP audio stream on port 8889)
+        audioRecordThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                AudioRecord recorder = null;
+                try {
+                    int minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT);
+                    int chunkSize = Math.max(minBuf, 640);
+                    recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, chunkSize * 2);
+                    recorder.startRecording();
+
+                    audioSendSocket = new DatagramSocket();
+                    byte[] pcmBuffer = new byte[chunkSize];
+
+                    InetAddress targetAddress = null;
+                    if (activeSocket != null && activeSocket.getInetAddress() != null) {
+                        targetAddress = activeSocket.getInetAddress();
+                    } else if (remotePeerIpAddress != null && !remotePeerIpAddress.isEmpty()) {
+                        targetAddress = InetAddress.getByName(remotePeerIpAddress);
+                    }
+
+                    if (targetAddress == null) {
+                        Log.e(TAG, "No valid IP address for target peer in voice call!");
+                        return;
+                    }
+
+                    while (isCallActive) {
+                        if (isMuted) {
+                            Arrays.fill(pcmBuffer, (byte) 0);
+                        } else {
+                            int read = recorder.read(pcmBuffer, 0, pcmBuffer.length);
+                            if (read <= 0) continue;
+                        }
+
+                        DatagramPacket packet = new DatagramPacket(pcmBuffer, pcmBuffer.length, targetAddress, AUDIO_PORT);
+                        audioSendSocket.send(packet);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "AudioRecordThread error: " + e.getMessage());
+                } finally {
+                    if (recorder != null) {
+                        try { recorder.stop(); recorder.release(); } catch (Exception ignored) {}
+                    }
+                    if (audioSendSocket != null && !audioSendSocket.isClosed()) {
+                        audioSendSocket.close();
+                    }
+                }
+            }
+        });
+        audioRecordThread.start();
+    }
+
+    private synchronized void stopVoiceCallEngine() {
+        if (!isCallActive) return;
+        isCallActive = false;
+        activeCallId = null;
+
+        if (audioReceiveSocket != null && !audioReceiveSocket.isClosed()) {
+            try { audioReceiveSocket.close(); } catch (Exception ignored) {}
+        }
+        if (audioSendSocket != null && !audioSendSocket.isClosed()) {
+            try { audioSendSocket.close(); } catch (Exception ignored) {}
+        }
+
+        try {
+            AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                am.setMode(AudioManager.MODE_NORMAL);
+                am.setSpeakerphoneOn(false);
+            }
+        } catch (Exception ignored) {}
+
+        Log.d(TAG, "Stopped P2P Voice Call Engine & released audio resources.");
+    }
+
     @PluginMethod
     public void getConnectionStatus(PluginCall call) {
         JSObject ret = new JSObject();
         ret.put("status", currentStatus);
         ret.put("isConnected", activeSocket != null && activeSocket.isConnected());
+        ret.put("isCallActive", isCallActive);
         call.resolve(ret);
     }
 
@@ -639,6 +919,22 @@ public class WifiDirectPlugin extends Plugin {
 
                                 } else if ("FILE_COMPLETE".equals(type)) {
                                     handleIncomingFileComplete(obj);
+
+                                } else if ("CALL_REQUEST".equals(type)) {
+                                    activeCallId = obj.getString("callId");
+                                    notifyListeners("onCallRequest", obj);
+
+                                } else if ("CALL_ACCEPT".equals(type)) {
+                                    startVoiceCallEngine();
+                                    notifyListeners("onCallAccepted", obj);
+
+                                } else if ("CALL_REJECT".equals(type)) {
+                                    stopVoiceCallEngine();
+                                    notifyListeners("onCallRejected", obj);
+
+                                } else if ("CALL_END".equals(type)) {
+                                    stopVoiceCallEngine();
+                                    notifyListeners("onCallEnded", obj);
                                 }
 
                             } catch (Exception parseEx) {
@@ -649,6 +945,7 @@ public class WifiDirectPlugin extends Plugin {
                         Log.d(TAG, "P2P Socket Reader Closed: " + e.getMessage());
                     } finally {
                         updateStatus("Disconnected");
+                        stopVoiceCallEngine();
                         JSObject statusObj = new JSObject();
                         statusObj.put("status", "Disconnected");
                         statusObj.put("reason", "Connection lost");
@@ -679,9 +976,6 @@ public class WifiDirectPlugin extends Plugin {
 
             FileTransferSession session = new FileTransferSession(transferId, cleanFilename, mimeType, fileSize, targetFile, bos);
             activeReceivingTransfers.put(transferId, session);
-
-            Log.d(TAG, "Incoming P2P File Header: " + cleanFilename + " | Size: " + fileSize + " bytes");
-
         } catch (Exception e) {
             Log.e(TAG, "Error handling FILE_HEADER: " + e.getMessage());
         }
@@ -728,8 +1022,6 @@ public class WifiDirectPlugin extends Plugin {
                 } catch (Exception ignored) {}
 
                 File receivedFile = session.targetFile;
-                Log.d(TAG, "P2P File Transfer Completed! Saved to: " + receivedFile.getAbsolutePath());
-
                 JSObject fileReceivedObj = new JSObject();
                 fileReceivedObj.put("transferId", transferId);
                 fileReceivedObj.put("filename", session.filename);
@@ -746,7 +1038,6 @@ public class WifiDirectPlugin extends Plugin {
 
     private String sanitizeFilename(String filename) {
         if (filename == null || filename.trim().isEmpty()) return "file_" + System.currentTimeMillis();
-        // Remove path traversal attempts
         String nameOnly = new File(filename).getName();
         return nameOnly.replaceAll("[^a-zA-Z0-9._-]", "_");
     }
@@ -805,6 +1096,7 @@ public class WifiDirectPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        stopVoiceCallEngine();
         closeSockets();
         if (receiver != null) {
             try {
